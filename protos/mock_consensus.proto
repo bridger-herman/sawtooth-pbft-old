@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+message ConsensusPeerMessage {
+  // Interpretation is left to the consensus engine implementation
+  string message_type = 1;
+
+  // The opaque payload to send to other nodes
+  bytes content = 2;
+
+  // Used to identify the consensus engine that produced this message
+  string name = 3;
+  string version = 4;
+}
