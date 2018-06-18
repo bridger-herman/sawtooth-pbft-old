@@ -15,83 +15,79 @@
 
 syntax = "proto3";
 
-enum PbftMessageType {
-  PRE_PREPARE = 0;
-  PREPARE = 1;
-  COMMIT = 2;
-  COMMIT_FINAL = 3;
+// PBFT-specific block information (don't need to keep sending the whole payload
+// around the network)
+message PbftBlock {
+  bytes block_id = 1;
+
+  bytes signer_id = 2;
+
+  uint64 block_num = 3;
+
+  bytes summary = 4;
 }
 
-// A consensus-specific message relating to PBFT
-message PbftMessage {
-  // The type of message (PrePrepare, Prepare, Commit, CommitFinal)
-  PbftMessageType type = 1;
+// Represents all common information used in a PBFT message
+message PbftMessageInfo {
+  // Type of the message
+  string msg_type = 1;
 
+  // View number
   uint64 view = 2;
-  uint64 sequence_number = 3;
-  ConsensusBlock block = 4;
-  bytes signer_id = 5;
+
+  // Sequence number (helps with ordering log)
+  uint64 seq_num = 3;
+
+  // Node who signed the message
+  bytes signer_id = 4;
+}
+
+
+// A generic PBFT message (PrePrepare, Prepare, Commit, CommitFinal,
+// Checkpoint)
+message PbftMessage {
+  // Message information
+  PbftMessageInfo info = 1;
+
+  // The actual message
+  PbftBlock block = 2;
 }
 
 
 // View change message, for when a node suspects the primary node is faulty
 message PbftViewChange {
-  // New view number
-  uint64 view = 1;
-
-  // Sequence number of last known stable checkpoint
-  uint64 stable_checkpoint = 2;
+  // Message information
+  PbftMessageInfo info = 1;
 
   // Set of `2f + 1` checkpoint messages, proving correctness of stable
-  // checkpoint mentioned in `sequence_number`
-  repeated Checkpoint checkpoint_messages = 3;
+  // checkpoint mentioned in info's `sequence_number`
+  repeated PbftMessage checkpoint_messages = 2;
 
   message PrepareMessagePair {
-    PbftMessage prepare_message = 1;
+    PbftMessage pre_prepare_message = 1;
 
-    repeated PbftMessageType prepare_messages = 2;
+    repeated PbftMessage prepare_messages = 2;
   }
 
   // `PrePrepare` message and `2f` `Prepare` messages for each `BlockNew`
   // message with a sequence number greater than `sequence_number`
-  PrepareMessagePair prepare_messages = 4;
-
-  // Node that initiated the view change
-  bytes node_id = 5;
+  // Used to help construct `PbftNewView` `pre_prepare_messages`
+  PrepareMessagePair prepare_messages = 3;
 }
 
 
 // New view message, for when there is consensus that the primary is faulty
 message PbftNewView {
-    // New view number
-    uint64 view = 1;
+  // Message information
+  PbftMessageInfo info = 1;
 
-    // Valid `ViewChange` messages received by new primary and the original
-    // `ViewChange` message sent by the new primary
-    repeated PbftViewChange view_change_messages = 2;
+  // Valid `ViewChange` messages received by new primary and the original
+  // `ViewChange` message sent by the new primary
+  repeated PbftViewChange view_change_messages = 2;
 
-    // New set of `PrePrepare` messages for every sequence number in between
-    // the last stable checkpoint in `view_change_messages` and the highest
-    // sequence number in `view_change_messages`.
-    repeated PbftMessage pre_prepare_messages = 3;
+  // New set of `PrePrepare` messages for every sequence number in between
+  // the last stable checkpoint in `view_change_messages` and the highest
+  // sequence number in `view_change_messages`.
+  repeated PbftMessage pre_prepare_messages = 3;
 }
 
-
-// Checkpoint message, used for garbage collection
-message Checkpoint {
-  // Sequence number of last completed request
-  uint64 sequence_number = 1;
-
-  // Digest of the node's state
-  bytes state_digest = 2;
-}
-
-// All information about a block that is relevant to consensus
-message ConsensusBlock {
-  bytes block_id = 1;
-  bytes previous_id = 2;
-  // The id of peer that signed this block
-  bytes signer_id = 3;
-  uint64 block_num = 4;
-  bytes payload = 5;
-}

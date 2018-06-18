@@ -28,17 +28,19 @@ fn main() {
 
     // Run protoc
     protoc_rust::run(protoc_rust::Args {
-            out_dir: "src/protos",
-            input: &[
-                "protos/pbft_message.proto",
-            ],
-            includes: &["protos"],
-            customize: Customize {
-                ..Default::default()
-            },
+        out_dir: "src/protos",
+        input: &[
+            "protos/pbft_message.proto",
+            "protos/mock_consensus.proto",
+        ],
+        includes: &["protos"],
+        customize: Customize {
+            ..Default::default()
+        },
     }).expect("Protoc Error");
 
     // Create mod.rs accordingly
     let mut mod_file = File::create("src/protos/mod.rs").unwrap();
     mod_file.write_all(b"pub mod pbft_message;\n").unwrap();
+    mod_file.write_all(b"pub mod mock_consensus;\n").unwrap();
 }

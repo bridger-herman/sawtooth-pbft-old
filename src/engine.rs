@@ -18,31 +18,55 @@
 use sawtooth_sdk::consensus::{engine::*, service::Service};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 
+use std::time::Duration;
+
+// How long to wait in between trying to publish blocks
+const BLOCK_DURATION: Duration = Duration::from_millis(3000);
+
+// How many requests in between each checkpoint
+const CHECKPOINT_PERIOD: u64 = 100;
+
+// How long to wait for a message to arrive
+const MESSAGE_TIMEOUT: Duration = Duration::from_millis(10);
+
 pub struct PbftEngine {
-    exit: Exit,
+    id: u64,
 }
 
 impl PbftEngine {
-    pub fn new() -> Self {
-        PbftEngine {
-            exit: Exit::new(),
-        }
+    pub fn new(id: u64) -> Self {
+        PbftEngine { id: id }
     }
 }
 
 impl Engine for PbftEngine {
     fn start(
-        &self,
-        update: Receiver<Update>,
-        service: Box<Service>,
-        mut chain_head: Block,
+        &mut self,
+        updates: Receiver<Update>,
+        mut service: Box<Service>,
+        chain_head: Block,
         _peers: Vec<PeerInfo>,
     ) {
+        // Event loop. Keep going until the system exits
+        loop {
+            let incoming_message = updates.recv_timeout(MESSAGE_TIMEOUT);
 
-    }
-
-    fn stop(&self) {
-        self.exit.set();
+            match incoming_message {
+                Ok(Update::BlockNew(block)) => {}
+                Ok(Update::BlockValid(block_id)) => {}
+                Ok(Update::BlockCommit(block_id)) => {}
+                Ok(Update::PeerMessage(message, _sender_id)) => {}
+                Ok(Update::Shutdown) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    error!("Timed out waiting for message");
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    error!("Disconnected from validator");
+                    break;
+                }
+                _ => unimplemented!(),
+            }
+        }
     }
 
     fn version(&self) -> String {

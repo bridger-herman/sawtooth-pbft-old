@@ -19,65 +19,56 @@
 extern crate clap;
 #[macro_use]
 extern crate log;
-extern crate log4rs;
+extern crate protobuf;
 extern crate sawtooth_sdk;
-
-mod engine;
+extern crate simple_logger;
 
 use std::process;
 
-use log::LevelFilter;
-use log4rs::append::console::ConsoleAppender;
-use log4rs::config::{Appender, Config, Root};
-use log4rs::encode::pattern::PatternEncoder;
+use sawtooth_sdk::consensus::zmq_driver::ZmqDriver;
 
-use engine::PbftEngine;
-use sawtooth_sdk::consensus::{driver::Driver, zmq_driver::ZmqDriver};
+// mod config;
+mod engine;
+// mod node;
+// mod ticker;
 
 fn main() {
-    let matches = clap_app!(pbft =>
+    let matches = clap_app!(sawtooth_pbft =>
         (version: crate_version!())
-        (about: "PBFT Consensus Engine (Rust)")
+        (about: "Pbft consensus for Sawtooth")
         (@arg connect: -C --connect +takes_value
          "connection endpoint for validator")
         (@arg verbose: -v --verbose +multiple
-         "increase output verbosity"))
+         "increase output verbosity")
+        (@arg ID: +required "the PBFT node's id"))
         .get_matches();
 
-    let endpoint = matches
+    let log_level = match matches.occurrences_of("verbose") {
+        0 =>  log::Level::Warn,
+        1 =>  log::Level::Info,
+        2 =>  log::Level::Debug,
+        3 | _ =>  log::Level::Trace,
+    };
+
+    let endpoint = String::from(
+        matches
         .value_of("connect")
-        .unwrap_or("tcp://localhost:5005");
+        .unwrap_or("tcp://localhost:5050")
+    );
 
-    let console_log_level;
-    match matches.occurrences_of("verbose") {
-        0 => console_log_level = LevelFilter::Warn,
-        1 => console_log_level = LevelFilter::Info,
-        2 => console_log_level = LevelFilter::Debug,
-        3 | _ => console_log_level = LevelFilter::Trace,
-    }
+    let id = value_t!(matches.value_of("ID"), u64)
+        .unwrap_or_else(|e| e.exit());
 
-    let stdout = ConsoleAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(
-            "{h({l:5.5})} | {({M}:{L}):20.20} | {m}{n}",
-        )))
-        .build();
+    simple_logger::init_with_level(log_level).unwrap();
 
-    let config = Config::builder()
-        .appender(Appender::builder().build("stdout", Box::new(stdout)))
-        .build(Root::builder().appender("stdout").build(console_log_level))
-        .unwrap_or_else(|err| {
-            error!("{}", err);
-            process::exit(1);
-        });
+    info!("Sawtooth PBFT Engine ({})", env!("CARGO_PKG_VERSION"));
 
-    log4rs::init_config(config).unwrap_or_else(|err| {
-        error!("{}", err);
-        process::exit(1);
-    });
+    let raft_engine = engine::PbftEngine::new(id);
 
-    let driver = ZmqDriver::new(Box::new(PbftEngine::new()));
+    let (driver, _stop) = ZmqDriver::new();
 
-    driver.start(&endpoint).unwrap_or_else(|err| {
+    info!("PBFT Node {} connecting to '{}'", &id, &endpoint);
+    driver.start(&endpoint, raft_engine).unwrap_or_else(|err| {
         error!("{}", err);
         process::exit(1);
     });
