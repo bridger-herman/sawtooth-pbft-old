@@ -20,6 +20,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 
 use std::time::Duration;
 
+use node::PbftNode;
+
+use config;
+
 // How long to wait in between trying to publish blocks
 const BLOCK_DURATION: Duration = Duration::from_millis(3000);
 
@@ -47,7 +51,14 @@ impl Engine for PbftEngine {
         chain_head: Block,
         _peers: Vec<PeerInfo>,
     ) {
-        // Event loop. Keep going until the system exits
+
+        let config = config::load_pbft_config(self.id, chain_head.block_id, &mut service);
+
+        info!("Peers: {:?}", config.peers);
+
+        let mut node = PbftNode::new(self.id, config.peers.len() as u64, service);
+
+        // Event loop. Keep going until we receive a shutdown message.
         loop {
             let incoming_message = updates.recv_timeout(MESSAGE_TIMEOUT);
 
