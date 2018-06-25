@@ -15,18 +15,21 @@
  * -----------------------------------------------------------------------------
  */
 
-use sawtooth_sdk::consensus::{engine::*, service::Service};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 
 use std::time::Duration;
 
-use node::PbftNode;
+use sawtooth_sdk::consensus::{engine::*, service::Service};
+
+use node::{
+    PbftNode,
+};
 
 use config;
 use ticker;
 
 // How long to wait in between trying to publish blocks
-const BLOCK_DURATION: Duration = Duration::from_secs(3);
+const BLOCK_DURATION: Duration = Duration::from_millis(2000);
 
 // How many requests in between each checkpoint
 const CHECKPOINT_PERIOD: u64 = 100;
@@ -55,7 +58,7 @@ impl Engine for PbftEngine {
 
         let mut working_ticker = ticker::Ticker::new(BLOCK_DURATION);
 
-        let config = config::load_pbft_config(self.id, chain_head.block_id, &mut service);
+        let config = config::load_pbft_config(chain_head.block_id, &mut service);
 
         info!("Peers: {:?}", config.peers);
 
@@ -64,9 +67,14 @@ impl Engine for PbftEngine {
 
         let mut node = PbftNode::new(self.id, config.peers, service);
 
+        // TODO: separate pull some functionality from node into this file, and
+        // separate/encapsulate out the service
+        //
         // Event loop. Keep going until we receive a shutdown message.
         loop {
             let incoming_message = updates.recv_timeout(MESSAGE_TIMEOUT);
+
+            node.retry_unread();
 
             match incoming_message {
                 Ok(Update::BlockNew(block)) => node.on_block_new(block),

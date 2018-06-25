@@ -41,7 +41,6 @@ impl PbftConfig {
 
 
 pub fn load_pbft_config(
-    node_id: u64,
     block_id: BlockId,
     service: &mut Box<Service>,
 ) -> PbftConfig {
@@ -63,8 +62,6 @@ pub fn load_pbft_config(
         .into_iter()
         .map(|(s, id)| (PeerId::from(hex::decode(s).expect("PeerId is not valid hex")), id))
         .collect();
-
-    let ids: Vec<u64> = peers.values().cloned().collect();
 
     config.peers = peers;
 
