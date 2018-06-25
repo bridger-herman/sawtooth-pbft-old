@@ -41,14 +41,14 @@ use protos::pbft_message::{
 };
 
 // Possible roles for a node
-// Primary is the only node who is allowed to commit to the blockchain
+// Primary is in charge of making consensus decisions
 #[derive(PartialEq)]
 enum PbftNodeRole {
     Primary,
     Secondary,
 }
 
-// Messages related to the multicast protocol
+// Messages related to the multicast protocol, in order
 #[derive(Debug, PartialEq, PartialOrd)]
 enum PbftMulticastType {
     Unset,
@@ -101,6 +101,7 @@ enum PbftStage {
 // The actual node
 pub struct PbftNode {
     id: u64,
+    seq_num: u64,
     stage: PbftStage,
     service: Box<Service>,
     role: PbftNodeRole,
@@ -138,6 +139,7 @@ impl PbftNode {
 
         PbftNode {
             id: id,
+            seq_num: 0,
             stage: PbftStage::NotStarted,
             role: if &id == current_primary {
                 PbftNodeRole::Primary
@@ -201,7 +203,6 @@ impl PbftNode {
                         self._broadcast_pbft_message(
                             PbftMulticastType::Prepare,
                             1,
-                            1,
                             (*deser_msg.get_block()).clone()
                         );
                     }
@@ -219,7 +220,6 @@ impl PbftNode {
                         // TODO: check committed predicate
                         self._broadcast_pbft_message(
                             PbftMulticastType::CommitFinal,
-                            1,
                             1,
                             (*deser_msg.get_block()).clone()
                         );
@@ -241,9 +241,15 @@ impl PbftNode {
                     }
                     PbftMulticastType::Unset => warn!("Message type Unset"),
                 }
+
+                // Add message to the log
+                self.msg_log.add_message(deser_msg);
+
+                debug!("{}", self.msg_log);
             }
             t => warn!("Message type {:?} not implemented", t),
         }
+
     }
 
     // Handle a new block from the Validator
@@ -254,11 +260,10 @@ impl PbftNode {
 
         self.stage = PbftStage::PrePreparing;
         // TODO: Check validity of block
-        // TODO: keep track of seq number and view in Node
+        // TODO: keep track of view in Node
         if self.role == PbftNodeRole::Primary {
             self._broadcast_pbft_message(
                 PbftMulticastType::PrePrepare,
-                1,
                 1,
                 pbft_block_from_block(block)
             );
@@ -266,7 +271,7 @@ impl PbftNode {
     }
 
     // Handle a block commit from the Validator
-    // If we're a primary, do nothing??
+    // If we're a primary, initialize a new block
     // If we're a secondary, commit the block in the message
     pub fn on_block_commit(&mut self, block_id: BlockId) {
         if self.stage == PbftStage::Committing {
@@ -306,7 +311,6 @@ impl PbftNode {
         self._broadcast_pbft_message(
             PbftMulticastType::Commit,
             1,
-            1,
             pbft_block_from_block(valid_blocks[0].clone())
         );
     }
@@ -315,6 +319,7 @@ impl PbftNode {
         debug!("{}: tried to update working block", self);
         if self.role == PbftNodeRole::Primary {
             if self.stage == PbftStage::Finished {
+                self.seq_num += 1;
                 self.service.initialize_block(None)
                     .expect("Couldn't initialize_block");
                 self.stage = PbftStage::NotStarted;
@@ -388,7 +393,6 @@ impl PbftNode {
         &mut self,
         msg_type: PbftMulticastType,
         view: u64,
-        seq_num: u64,
         block: PbftBlock
     ) {
         // Make sure that we should be sending messages of this type
@@ -397,7 +401,7 @@ impl PbftNode {
             return;
         }
 
-        let msg_bytes = make_msg_bytes(make_msg_info(&msg_type, view, seq_num), block);
+        let msg_bytes = make_msg_bytes(make_msg_info(&msg_type, view, self.seq_num), block);
 
         // TODO: self.stage should probably have a mutex around it.
         // Broadcast to peers
