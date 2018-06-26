@@ -249,6 +249,11 @@ impl PbftNode {
                         self.msg_log.add_message(deser_msg.clone());
                         self.stage = PbftStage::FinalCommitting;
 
+                        if !self._committed(&deser_msg) {
+                            error!("`committed` predicate is false!");
+                            return;
+                        }
+
                         // TODO: check committed predicate
                         self._broadcast_pbft_message(
                             PbftMessageType::CommitFinal,
@@ -484,6 +489,26 @@ impl PbftNode {
         }
 
         true
+    }
+
+    // "committed" predicate
+    fn _committed(&self, deser_msg: &PbftMessage) -> bool {
+        let commit_msgs = self.msg_log.get_messages_of_type(
+            &PbftMessageType::Commit,
+            deser_msg.get_info().get_seq_num()
+        );
+
+        // TODO: Check that commit messages are from different nodes
+        if commit_msgs.len() < (2 * self.f + 1) as usize {
+            error!(
+                "Not enough Commit messages (have {}, need {})",
+                commit_msgs.len(),
+                2 * self.f + 1
+            );
+            return false;
+        }
+
+        self._prepared(deser_msg)
     }
 
     fn _broadcast_pbft_message(
