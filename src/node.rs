@@ -19,12 +19,10 @@ use protobuf;
 use protobuf::Message;
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 
 use std::fmt;
 use std::convert::From;
 
-use pbft_log::PbftLog;
 use sawtooth_sdk::consensus::service::Service;
 use sawtooth_sdk::consensus::engine::{
     PeerMessage,
@@ -39,6 +37,9 @@ use protos::pbft_message::{
     PbftMessage,
     PbftMessageInfo,
 };
+
+use pbft_log::PbftLog;
+use message_type::PbftMessageType;
 
 // // Errors that might occur in a PbftNode
 // #[derive(Debug)]
@@ -71,53 +72,6 @@ enum PbftNodeRole {
     Secondary,
 }
 
-// Messages related to the multicast protocol, in order
-#[derive(Debug, PartialEq, PartialOrd)]
-enum PbftMessageType {
-    Unset,
-
-    // Basic message types for the multicast protocol
-    PrePrepare,
-    Prepare,
-    Commit,
-    CommitFinal,
-
-    // Auxiliary PBFT messages
-    BlockNew,
-    Checkpoint,
-    ViewChange,
-    NewView,
-}
-
-impl<'a> From<&'a str> for PbftMessageType {
-    fn from(s: &'a str) -> Self {
-        match s {
-            "pre_prepare" => PbftMessageType::PrePrepare,
-            "prepare" => PbftMessageType::Prepare,
-            "commit" => PbftMessageType::Commit,
-            "commit_final" => PbftMessageType::CommitFinal,
-            "block_new" => PbftMessageType::BlockNew,
-            _ => {
-                warn!("Unhandled multicast message type: {}", s);
-                PbftMessageType::Unset
-            },
-        }
-    }
-}
-
-impl<'a> From<&'a PbftMessageType> for String {
-    fn from(mc_type: &'a PbftMessageType) -> String {
-        match mc_type {
-            PbftMessageType::PrePrepare => String::from("pre_prepare"),
-            PbftMessageType::Prepare => String::from("prepare"),
-            PbftMessageType::Commit => String::from("commit"),
-            PbftMessageType::CommitFinal => String::from("commit_final"),
-            PbftMessageType::BlockNew => String::from("block_new"),
-            _ => String::from("unset"),
-        }
-    }
-}
-
 
 // Stages of the PBFT algorithm
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -141,7 +95,6 @@ pub struct PbftNode {
     role: PbftNodeRole,
     network_node_ids: HashMap<u64, PeerId>,
     msg_log: PbftLog,
-    unread_queue: VecDeque<PeerMessage>,
 }
 
 impl fmt::Display for PbftNode {
@@ -184,8 +137,6 @@ impl PbftNode {
             network_node_ids: peer_id_map,
             service: service,
             msg_log: PbftLog::new(),
-            unread_queue: VecDeque::new(), // TODO: Move this to message log?
-
         }
     }
 
@@ -196,7 +147,7 @@ impl PbftNode {
         let msg_type = msg_type.as_str();
 
         match msg_type {
-            "pre_prepare" | "prepare" | "commit" | "commit_final" => {
+            "PrePrepare" | "Prepare" | "Commit" | "CommitFinal" => {
                 let mc_type = PbftMessageType::from(msg_type);
 
                 let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
@@ -218,7 +169,7 @@ impl PbftNode {
                             msg_type,
                             self.stage,
                         );
-                        self.unread_queue.push_back(msg);
+                        self.msg_log.add_unread(msg);
                     }
                     return;
                 }
@@ -244,7 +195,7 @@ impl PbftNode {
                         {
                             // Check that this PrePrepare doesn't already exist
                             let existing_pre_prep_msgs = self.msg_log.get_messages_of_type(
-                                "pre_prepare",
+                                &PbftMessageType::PrePrepare,
                                 info.get_seq_num()
                              );
 
@@ -255,7 +206,7 @@ impl PbftNode {
 
                             // Check that incoming PrePrepare matches original BlockNew
                             let block_new_msgs = self.msg_log.get_messages_of_type(
-                                "block_new",
+                                &PbftMessageType::BlockNew,
                                 deser_msg.get_info().get_seq_num()
                             );
 
@@ -264,8 +215,6 @@ impl PbftNode {
                                 return;
                             }
                         }
-
-                        // TODO: Check water marks (low and high)
 
                         self.stage = PbftStage::Preparing;
 
@@ -320,7 +269,7 @@ impl PbftNode {
     }
 
     // Creates a new working block on the working block queue and kick off the consensus algorithm
-    // by broadcasting a "pre_prepare" message to peers
+    // by broadcasting a "PrePrepare" message to peers
     //
     // Assumes the validator has checked that the block signature is valid, and that it is to
     // be built on top of the current chain head.
@@ -415,7 +364,7 @@ impl PbftNode {
 
     // Retry one unread message. Called from event loop rapidly
     pub fn retry_unread(&mut self) {
-        if let Some(m) = self.unread_queue.pop_front() {
+        if let Some(m) = self.msg_log.pop_unread() {
             debug!("{}: Resending message: {:?}", self, m.message_type);
             self.on_peer_message(m);
         }
