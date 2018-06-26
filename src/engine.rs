@@ -26,7 +26,7 @@ use node::{
 };
 
 use config;
-use ticker;
+use timing;
 
 // How long to wait in between trying to publish blocks
 const BLOCK_DURATION: Duration = Duration::from_millis(2000);
@@ -56,7 +56,7 @@ impl Engine for PbftEngine {
         _peers: Vec<PeerInfo>,
     ) {
 
-        let mut working_ticker = ticker::Ticker::new(BLOCK_DURATION);
+        let mut working_ticker = timing::Ticker::new(BLOCK_DURATION);
 
         let config = config::load_pbft_config(chain_head.block_id, &mut service);
 
