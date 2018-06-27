@@ -42,7 +42,7 @@ use pbft_log::PbftLog;
 use message_type::PbftMessageType;
 use state::{
     PbftState,
-    PbftStage,
+    PbftPhase,
 };
 
 // The actual node
@@ -60,7 +60,7 @@ impl fmt::Display for PbftNode {
             " "
         };
 
-        write!(f, "Node {}{:02} ({:?})", ast, self.state.id, self.state.stage)
+        write!(f, "Node {}{:02} ({:?})", ast, self.state.id, self.state.phase)
     }
 }
 
@@ -90,7 +90,7 @@ impl PbftNode {
                 });
 
                 // Don't process message if we're not ready for it.
-                // i.e. Don't process prepare messages if we're not in the PbftStage::Preparing
+                // i.e. Don't process prepare messages if we're not in the PbftPhase::Preparing
                 let expecting_type = self.state.check_msg_type();
                 if expecting_type != mc_type {
                     info!(
@@ -98,7 +98,7 @@ impl PbftNode {
                         self,
                         self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
                         msg_type,
-                        self.state.stage,
+                        self.state.phase,
                     );
                     return;
                 }
@@ -181,7 +181,7 @@ impl PbftNode {
                         // TODO: Putting log add here is necessary because on_peer_message gets
                         // called again inside of _broadcast_pbft_message
                         self.msg_log.add_message(deser_msg.clone());
-                        self.state.stage = PbftStage::Preparing;
+                        self.state.advance_phase();
 
                         self._broadcast_pbft_message(
                             info.get_seq_num(),
@@ -192,9 +192,7 @@ impl PbftNode {
                     PbftMessageType::Prepare => {
                         // Add message to the log
                         self.msg_log.add_message(deser_msg.clone());
-
-                        // TODO: convert these into next_stage() or something
-                        self.state.stage = PbftStage::Checking;
+                        self.state.advance_phase();
 
                         if !self._prepared(&deser_msg) {
                             error!("`prepared` predicate is false!");
@@ -208,7 +206,7 @@ impl PbftNode {
                     PbftMessageType::Commit => {
                         // Add message to the log
                         self.msg_log.add_message(deser_msg.clone());
-                        self.state.stage = PbftStage::FinalCommitting;
+                        self.state.advance_phase();
 
                         if !self._committed(&deser_msg) {
                             error!("`committed` predicate is false!");
@@ -224,7 +222,7 @@ impl PbftNode {
                     PbftMessageType::CommitFinal => {
                         // Add message to the log
                         self.msg_log.add_message(deser_msg.clone());
-                        self.state.stage = PbftStage::Finished;
+                        self.state.advance_phase();
 
                         let commit_final_msgs = self.msg_log.get_messages_of_type(
                             &PbftMessageType::CommitFinal,
@@ -292,8 +290,7 @@ impl PbftNode {
         msg.set_block(pbft_block.clone());
 
         self.msg_log.add_message(msg);
-
-        self.state.stage = PbftStage::PrePreparing;
+        self.state.advance_phase();
 
         // TODO: keep track of view in Node
         if self.state.is_primary() {
@@ -310,7 +307,7 @@ impl PbftNode {
     // If we're a primary, initialize a new block
     // If we're a secondary, commit the block in the message
     pub fn on_block_commit(&mut self, block_id: BlockId) {
-        if self.state.stage == PbftStage::Finished {
+        if self.state.phase == PbftPhase::Finished {
             if self.state.is_primary() {
                 // Initialize block if we're ready to do so
                 info!("{}: <<<<<< BlockCommit and initializing new one: {:?}", self, block_id);
@@ -318,7 +315,7 @@ impl PbftNode {
                     .unwrap_or_else(|err| error!("Couldn't initialize block: {}", err));
                 self.state.seq_num += 1;
             }
-            self.state.stage = PbftStage::NotStarted;
+            self.state.advance_phase();
         }
     }
 
@@ -326,8 +323,7 @@ impl PbftNode {
     // This message comes after check_blocks is called
     pub fn on_block_valid(&mut self, block_id: BlockId) {
         info!("{}: <<<<<< BlockValid: {:?}", self, block_id);
-
-        self.state.stage = PbftStage::Committing;
+        self.state.advance_phase();
 
         // TODO: remove panic?
         let valid_blocks: Vec<Block> = self.service.get_blocks(vec![block_id])
@@ -349,7 +345,7 @@ impl PbftNode {
     // The primary tries to finalize a block every so often
     pub fn update_working_block(&mut self) {
         if self.state.is_primary() {
-            if self.state.stage == PbftStage::NotStarted {
+            if self.state.phase == PbftPhase::NotStarted {
                 match self.service.finalize_block(vec![]) {
                     Ok(block_id) => {
                         info!("{}: Publishing block {:?}", self, block_id);

@@ -33,9 +33,8 @@ enum PbftNodeRole {
 
 
 // Stages of the PBFT algorithm
-// TODO: should probably find a better name for this...
-#[derive(Debug, PartialEq, PartialOrd)]
-pub enum PbftStage {
+#[derive(Debug, PartialEq, PartialOrd, Clone)]
+pub enum PbftPhase {
     NotStarted,
     PrePreparing,
     Preparing,
@@ -57,8 +56,8 @@ pub struct PbftState {
     // The current view (where the primary's ID is p = v mod network_node_ids.len())
     pub view: u64,
 
-    // Current stage of the algorithm
-    pub stage: PbftStage,
+    // Current phase of the algorithm
+    pub phase: PbftPhase,
 
     // Is this node primary or secondary?
     role: PbftNodeRole,
@@ -89,7 +88,7 @@ impl PbftState {
             id: id,
             seq_num: 0, // Default to unknown
             view: 1,
-            stage: PbftStage::NotStarted,
+            phase: PbftPhase::NotStarted,
             role: if &id == current_primary {
                 PbftNodeRole::Primary
             } else {
@@ -100,13 +99,13 @@ impl PbftState {
         }
     }
 
-    // Checks to see what type of message we're expecting or sending, based on what stage we're in
+    // Checks to see what type of message we're expecting or sending, based on what phase we're in
     pub fn check_msg_type(&self) -> PbftMessageType {
-        match self.stage {
-            PbftStage::PrePreparing => PbftMessageType::PrePrepare,
-            PbftStage::Preparing => PbftMessageType::Prepare,
-            PbftStage::Committing => PbftMessageType::Commit,
-            PbftStage::FinalCommitting => PbftMessageType::CommitFinal,
+        match self.phase {
+            PbftPhase::PrePreparing => PbftMessageType::PrePrepare,
+            PbftPhase::Preparing => PbftMessageType::Prepare,
+            PbftPhase::Committing => PbftMessageType::Commit,
+            PbftPhase::FinalCommitting => PbftMessageType::CommitFinal,
             _ => PbftMessageType::Unset,
         }
     }
@@ -133,5 +132,20 @@ impl PbftState {
     // Tell if this node is currently a primary
     pub fn is_primary(&self) -> bool {
         self.role == PbftNodeRole::Primary
+    }
+
+    // Go to the next phase and return the phase we're at now
+    pub fn advance_phase(&mut self) -> PbftPhase {
+        let next = match self.phase {
+            PbftPhase::NotStarted => PbftPhase::PrePreparing,
+            PbftPhase::PrePreparing => PbftPhase::Preparing,
+            PbftPhase::Preparing => PbftPhase::Checking,
+            PbftPhase::Checking => PbftPhase::Committing,
+            PbftPhase::Committing => PbftPhase::FinalCommitting,
+            PbftPhase::FinalCommitting => PbftPhase::Finished,
+            PbftPhase::Finished => PbftPhase::NotStarted,
+        };
+        self.phase = next.clone();
+        next
     }
 }
