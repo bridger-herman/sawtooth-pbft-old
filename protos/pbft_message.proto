@@ -37,6 +37,9 @@ message PbftMessageInfo {
 
   // Sequence number (helps with ordering log)
   uint64 seq_num = 3;
+
+  // Node who signed the message
+  bytes signer_id = 4;
 }
 
 
