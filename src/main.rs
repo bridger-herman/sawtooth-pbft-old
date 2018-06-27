@@ -36,6 +36,7 @@ mod node;
 mod config;
 mod timing;
 mod message_type;
+mod state;
 
 fn main() {
     let matches = clap_app!(sawtooth_pbft =>
