@@ -16,7 +16,10 @@
  */
 
 use protobuf;
-use protobuf::Message;
+use protobuf::{
+    Message,
+    ProtobufError,
+};
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,6 +47,8 @@ use state::{
     PbftState,
     PbftPhase,
 };
+use config::PbftConfig;
+
 
 // The actual node
 pub struct PbftNode {
@@ -65,11 +70,11 @@ impl fmt::Display for PbftNode {
 }
 
 impl PbftNode {
-    pub fn new(id: u64, peers: HashMap<PeerId, u64>, service: Box<Service>) -> Self {
+    pub fn new(id: u64, config: &PbftConfig, service: Box<Service>) -> Self {
         PbftNode {
-            state: PbftState::new(id, peers),
+            state: PbftState::new(id, config),
             service: service,
-            msg_log: PbftLog::new(),
+            msg_log: PbftLog::new(config),
         }
     }
 
@@ -83,17 +88,18 @@ impl PbftNode {
             "PrePrepare" | "Prepare" | "Commit" | "CommitFinal" => {
                 let mc_type = PbftMessageType::from(msg_type);
 
-                let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
-                    .unwrap_or_else(|err| {
-                        error!("Couldn't deserialize message: {}", err);
-                        return;
-                });
+                let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
+                if let Err(e) = deser_msg {
+                    error!("Couldn't deserialize message: {}", e);
+                    return;
+                }
+                let deser_msg = deser_msg.unwrap();
 
                 // Don't process message if we're not ready for it.
                 // i.e. Don't process prepare messages if we're not in the PbftPhase::Preparing
                 let expecting_type = self.state.check_msg_type();
                 if expecting_type != mc_type {
-                    info!(
+                    debug!(
                         "{}: !!!!!! [Node {:02}]: {:?} (in mode {:?})",
                         self,
                         self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
@@ -326,10 +332,7 @@ impl PbftNode {
         self.state.advance_phase();
 
         let valid_blocks: Vec<Block> = self.service.get_blocks(vec![block_id])
-            .unwrap_or_else(|err| {
-                error!("Couldn't get block: {:?}", err);
-                return;
-            })
+            .unwrap_or(HashMap::new())
             .into_iter()
             .map(|(_block_id, block)| block)
             .collect();
@@ -452,7 +455,7 @@ impl PbftNode {
         let msg_bytes = make_msg_bytes(
             make_msg_info(&msg_type, self.state.view, seq_num, self.state.get_own_peer_id()),
             block
-        );
+        ).unwrap_or(Vec::<u8>::new());
 
         // Broadcast to peers
         self.service.broadcast(String::from(&msg_type).as_str(), msg_bytes.clone())
@@ -487,14 +490,12 @@ fn make_msg_info(msg_type: &PbftMessageType, view: u64, seq_num: u64, signer_id:
     info
 }
 
-fn make_msg_bytes(info: PbftMessageInfo, block: PbftBlock) -> Vec<u8> {
+fn make_msg_bytes(info: PbftMessageInfo, block: PbftBlock) -> Result<Vec<u8>, ProtobufError> {
     let mut msg = PbftMessage::new();
     msg.set_info(info);
     msg.set_block(block);
 
-    msg.write_to_bytes().unwrap_or_else(|err| {
-        panic!("Couldn't serialize commit message: {}", err);
-    })
+    msg.write_to_bytes()
 }
 
 fn pbft_block_from_block(block: Block) -> PbftBlock {
