@@ -17,18 +17,12 @@
 
 use std::fmt;
 
-use std::collections::VecDeque;
-
-use sawtooth_sdk::consensus::engine::{PeerMessage};
-
 use protos::pbft_message::{PbftMessage, PbftViewChange, PbftNewView};
 
 use hex;
 
 use message_type::PbftMessageType;
-
-
-const MAX_LOG_SIZE: u64 = 1000;
+use config::PbftConfig;
 
 // Struct for storing messages that a PbftNode receives
 pub struct PbftLog {
@@ -43,6 +37,9 @@ pub struct PbftLog {
     // Ensures log does not get too large
     low_water_mark: u64,
     high_water_mark: u64,
+
+    // Maximum log size, defined from on-chain settings
+    max_log_size: u64,
 }
 
 impl fmt::Display for PbftLog {
@@ -77,13 +74,14 @@ impl fmt::Display for PbftLog {
 }
 
 impl PbftLog {
-    pub fn new() -> Self {
+    pub fn new(config: &PbftConfig) -> Self {
         PbftLog {
             messages: vec![],
             view_changes: vec![],
             new_views: vec![],
             low_water_mark: 0,
-            high_water_mark: MAX_LOG_SIZE,
+            high_water_mark: config.max_log_size,
+            max_log_size: config.max_log_size,
         }
     }
 
