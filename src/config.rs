@@ -15,8 +15,8 @@
  * -----------------------------------------------------------------------------
  */
 
-use serde_json;
 use hex;
+use serde_json;
 
 use std::collections::HashMap;
 
@@ -24,10 +24,7 @@ use std::time::Duration;
 
 use std::fmt;
 
-use sawtooth_sdk::consensus::{
-    engine::{PeerId, BlockId},
-    service::Service
-};
+use sawtooth_sdk::consensus::{engine::{BlockId, PeerId}, service::Service};
 
 #[derive(Debug)]
 pub struct PbftConfig {
@@ -47,7 +44,6 @@ pub struct PbftConfig {
     pub max_log_size: u64,
 }
 
-
 impl PbftConfig {
     pub fn default() -> Self {
         PbftConfig {
@@ -60,21 +56,20 @@ impl PbftConfig {
     }
 }
 
-pub fn load_pbft_config(
-    block_id: BlockId,
-    service: &mut Box<Service>,
-) -> PbftConfig {
-
+pub fn load_pbft_config(block_id: BlockId, service: &mut Box<Service>) -> PbftConfig {
     let mut config = PbftConfig::default();
 
     let sawtooth_settings: HashMap<String, String> = service
-        .get_settings(block_id, vec![
-              String::from("sawtooth.consensus.pbft.peers"),
-              String::from("sawtooth.consensus.pbft.block_duration"),
-              String::from("sawtooth.consensus.pbft.checkpoint_period"),
-              String::from("sawtooth.consensus.pbft.message_timeout"),
-              String::from("sawtooth.consensus.pbft.max_log_size"),
-        ])
+        .get_settings(
+            block_id,
+            vec![
+                String::from("sawtooth.consensus.pbft.peers"),
+                String::from("sawtooth.consensus.pbft.block_duration"),
+                String::from("sawtooth.consensus.pbft.checkpoint_period"),
+                String::from("sawtooth.consensus.pbft.message_timeout"),
+                String::from("sawtooth.consensus.pbft.max_log_size"),
+            ],
+        )
         .expect("Failed to get on-chain settings");
 
     // Get the peers associated with this node (including ourselves)
@@ -87,7 +82,12 @@ pub fn load_pbft_config(
 
     let peers: HashMap<PeerId, u64> = peers
         .into_iter()
-        .map(|(s, id)| (PeerId::from(hex::decode(s).expect("PeerId is not valid hex")), id))
+        .map(|(s, id)| {
+            (
+                PeerId::from(hex::decode(s).expect("PeerId is not valid hex")),
+                id,
+            )
+        })
         .collect();
 
     config.peers = peers;
