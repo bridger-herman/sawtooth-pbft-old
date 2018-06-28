@@ -1,0 +1,16 @@
+#!/bin/bash
+
+xo create game1 --url http://rest-api-1:8008
+
+xo take game1 4 --url http://rest-api-1:8008
+xo take game1 5 --url http://rest-api-1:8008
+
+xo take game1 1 --url http://rest-api-2:8008
+xo take game1 2 --url http://rest-api-2:8008
+
+xo take game1 9 --url http://rest-api-3:8008
+xo take game1 8 --url http://rest-api-3:8008
+
+xo show game1 --url http://rest-api-1:8008
+xo show game1 --url http://rest-api-2:8008
+xo show game1 --url http://rest-api-3:8008
