@@ -19,24 +19,24 @@
 extern crate clap;
 #[macro_use]
 extern crate log;
+extern crate hex;
 extern crate protobuf;
 extern crate sawtooth_sdk;
-extern crate simple_logger;
-extern crate hex;
 extern crate serde_json;
+extern crate simple_logger;
 
 use std::process;
 
 use sawtooth_sdk::consensus::zmq_driver::ZmqDriver;
 
-mod pbft_log;
-mod engine;
-mod protos;
-mod node;
 mod config;
-mod timing;
+mod engine;
 mod message_type;
+mod node;
+mod pbft_log;
+mod protos;
 mod state;
+mod timing;
 
 fn main() {
     let matches = clap_app!(sawtooth_pbft =>
@@ -50,20 +50,19 @@ fn main() {
         .get_matches();
 
     let log_level = match matches.occurrences_of("verbose") {
-        0 =>  log::Level::Warn,
-        1 =>  log::Level::Info,
-        2 =>  log::Level::Debug,
-        3 | _ =>  log::Level::Trace,
+        0 => log::Level::Warn,
+        1 => log::Level::Info,
+        2 => log::Level::Debug,
+        3 | _ => log::Level::Trace,
     };
 
     let endpoint = String::from(
         matches
-        .value_of("connect")
-        .unwrap_or("tcp://localhost:5050")
+            .value_of("connect")
+            .unwrap_or("tcp://localhost:5050"),
     );
 
-    let id = value_t!(matches.value_of("ID"), u64)
-        .unwrap_or_else(|e| e.exit());
+    let id = value_t!(matches.value_of("ID"), u64).unwrap_or_else(|e| e.exit());
 
     simple_logger::init_with_level(log_level).unwrap();
 
