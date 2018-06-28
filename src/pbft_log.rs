@@ -17,12 +17,12 @@
 
 use std::fmt;
 
-use protos::pbft_message::{PbftMessage, PbftViewChange, PbftNewView};
+use protos::pbft_message::{PbftMessage, PbftNewView, PbftViewChange};
 
 use hex;
 
-use message_type::PbftMessageType;
 use config::PbftConfig;
+use message_type::PbftMessageType;
 
 // Struct for storing messages that a PbftNode receives
 pub struct PbftLog {
@@ -50,7 +50,7 @@ impl fmt::Display for PbftLog {
                 let info = msg.get_info();
                 let block = msg.get_block();
                 format!(
-"    {{ {}, view: {}, seq: {} }}
+                    "    {{ {}, view: {}, seq: {} }}
         block_num: {}
         block_id: {}
         signer: {}",
@@ -65,9 +65,9 @@ impl fmt::Display for PbftLog {
             .collect();
         write!(
             f,
-            "\nPbftLog ({}, {}):\n{}", 
-            self.low_water_mark, 
-            self.high_water_mark, 
+            "\nPbftLog ({}, {}):\n{}",
+            self.low_water_mark,
+            self.high_water_mark,
             msg_string_vec.join("\n")
         )
     }
@@ -87,8 +87,9 @@ impl PbftLog {
 
     // Methods for dealing with PbftMessages
     pub fn add_message(&mut self, msg: PbftMessage) {
-        if msg.get_info().get_seq_num() < self.high_water_mark || 
-                msg.get_info().get_seq_num() >= self.low_water_mark {
+        if msg.get_info().get_seq_num() < self.high_water_mark
+            || msg.get_info().get_seq_num() >= self.low_water_mark
+        {
             self.messages.push(msg);
             debug!("{}", self);
         } else {
@@ -109,23 +110,20 @@ impl PbftLog {
         self.messages
             .iter()
             .filter(|&msg| {
-                (*msg).get_info().get_msg_type() == String::from(msg_type) &&
-                    (*msg).get_info().get_seq_num() == sequence_number
+                (*msg).get_info().get_msg_type() == String::from(msg_type)
+                    && (*msg).get_info().get_seq_num() == sequence_number
             })
             .collect()
     }
 
     // Fix sequence numbers of generic messages that are defaulted to zero
-    pub fn fix_seq_nums(
-        &mut self,
-        msg_type: &PbftMessageType,
-        new_sequence_number: u64,
-    ) -> usize {
+    pub fn fix_seq_nums(&mut self, msg_type: &PbftMessageType, new_sequence_number: u64) -> usize {
         let mut changed_msgs = 0;
         for m in &mut self.messages {
             let mut info = m.get_info().clone();
-            if m.get_info().get_msg_type() == String::from(msg_type) && 
-                    m.get_info().get_seq_num() == 0 {
+            if m.get_info().get_msg_type() == String::from(msg_type)
+                && m.get_info().get_seq_num() == 0
+            {
                 info.set_seq_num(new_sequence_number);
             }
             m.set_info(info);
