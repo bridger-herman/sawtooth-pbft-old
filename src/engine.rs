@@ -26,11 +26,15 @@ use timing;
 
 pub struct PbftEngine {
     id: u64,
+    dead: bool,
 }
 
 impl PbftEngine {
-    pub fn new(id: u64) -> Self {
-        PbftEngine { id: id }
+    pub fn new(id: u64, dead: bool) -> Self {
+        PbftEngine {
+            id: id,
+            dead: dead,
+        }
     }
 }
 
@@ -54,6 +58,10 @@ impl Engine for PbftEngine {
         // Event loop. Keep going until we receive a shutdown message.
         loop {
             let incoming_message = updates.recv_timeout(config.message_timeout);
+
+            if self.dead {
+                continue;
+            }
 
             if let Err(e) = match incoming_message {
                 Ok(Update::BlockNew(block)) => node.on_block_new(block),

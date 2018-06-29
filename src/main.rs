@@ -42,12 +42,13 @@ mod timing;
 fn main() {
     let matches = clap_app!(sawtooth_pbft =>
         (version: crate_version!())
-        (about: "Pbft consensus for Sawtooth")
+        (about: "PBFT consensus for Sawtooth")
         (@arg connect: -C --connect +takes_value
          "connection endpoint for validator")
         (@arg verbose: -v --verbose +multiple
          "increase output verbosity")
-        (@arg ID: +required "the PBFT node's id"))
+        (@arg ID: +required "the PBFT node's id")
+        (@arg dead: -d "simulate a dead node"))
         .get_matches();
 
     let log_level = match matches.occurrences_of("verbose") {
@@ -69,11 +70,17 @@ fn main() {
 
     info!("Sawtooth PBFT Engine ({})", env!("CARGO_PKG_VERSION"));
 
-    let pbft_engine = engine::PbftEngine::new(id);
+    let dead = matches.occurrences_of("dead") > 0;
+    if dead {
+        info!("This node is dead");
+    }
+
+    let pbft_engine = engine::PbftEngine::new(id, dead);
 
     let (driver, _stop) = ZmqDriver::new();
 
     info!("PBFT Node {} connecting to '{}'", &id, &endpoint);
+
     driver.start(&endpoint, pbft_engine).unwrap_or_else(|err| {
         error!("{}", err);
         process::exit(1);
