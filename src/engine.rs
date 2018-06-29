@@ -50,9 +50,9 @@ impl Engine for PbftEngine {
         let mut working_ticker = timing::Ticker::new(config.block_duration);
         let mut timeout = timing::Timeout::new(config.view_change_timeout);
 
-        info!("Configuration: {:#?}", config);
-
         let mut node = PbftNode::new(self.id, &config, service);
+
+        info!("Starting state: {:#?}", node.state);
 
         // Event loop. Keep going until we receive a shutdown message.
         loop {
@@ -87,7 +87,7 @@ impl Engine for PbftEngine {
 
             // Check to see if timeout has expired; initiate ViewChange if necessary
             if timeout.is_expired() {
-                error!("Timeout expired!!");
+                node.start_view_change().unwrap_or_else(|e| error!("{}", e));
             }
         }
     }

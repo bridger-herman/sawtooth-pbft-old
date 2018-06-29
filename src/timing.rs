@@ -41,12 +41,14 @@ impl Ticker {
     }
 }
 
+#[derive(Debug)]
 enum TimeoutState {
     Active,
     Expired,
 }
 
 // Check back on this timer every so often to see if it's expired
+#[derive(Debug)]
 pub struct Timeout {
     state: TimeoutState,
     duration: Duration,

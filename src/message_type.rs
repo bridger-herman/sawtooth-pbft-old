@@ -43,6 +43,10 @@ impl PbftMessageType {
             _ => false,
         }
     }
+
+    pub fn is_view_change(&self) -> bool {
+        self == &PbftMessageType::ViewChange
+    }
 }
 
 impl<'a> From<&'a str> for PbftMessageType {

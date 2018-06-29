@@ -24,7 +24,7 @@ use message_type::PbftMessageType;
 
 // Possible roles for a node
 // Primary is in charge of making consensus decisions
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum PbftNodeRole {
     Primary,
     Secondary,
@@ -42,7 +42,14 @@ pub enum PbftPhase {
     Finished,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum PbftMode {
+    Normal,
+    ViewChange,
+}
+
 // Information about the PBFT algorithm's state
+#[derive(Debug)]
 pub struct PbftState {
     // This node's ID
     pub id: u64,
@@ -60,6 +67,9 @@ pub struct PbftState {
     // Is this node primary or secondary?
     role: PbftNodeRole,
 
+    // Normal operation or view change
+    pub mode: PbftMode,
+
     // Map of peers in the network, including ourselves
     network_node_ids: HashMap<u64, PeerId>,
 
@@ -76,14 +86,6 @@ impl PbftState {
             .map(|(peer_id, node_id)| (node_id, peer_id))
             .collect();
 
-        // TODO: update this to reflect view
-        let current_primary = config
-            .peers
-            .iter()
-            .map(|(_peer_id, node_id)| node_id)
-            .min()
-            .unwrap_or(&1);
-
         PbftState {
             id: id,
             seq_num: 0, // Default to unknown
@@ -94,7 +96,8 @@ impl PbftState {
             } else {
                 PbftNodeRole::Secondary
             },
-            f: ((peer_id_map.len() - 1) / 3) as u64,
+            mode: PbftMode::Normal,
+            f: f,
             network_node_ids: peer_id_map,
         }
     }
