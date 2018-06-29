@@ -276,8 +276,6 @@ impl PbftNode {
                 self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
             );
 
-            info!("{}", self.msg_log);
-
             let mut nv_msg = PbftNewView::new();
             {
                 self.msg_log.add_view_change(deser_msg.clone());
