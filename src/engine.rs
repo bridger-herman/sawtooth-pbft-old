@@ -24,6 +24,8 @@ use node::PbftNode;
 use config;
 use timing;
 
+use error::PbftError;
+
 pub struct PbftEngine {
     id: u64,
 }
@@ -46,6 +48,7 @@ impl Engine for PbftEngine {
         let config = config::load_pbft_config(chain_head.block_id, &mut service);
 
         let mut working_ticker = timing::Ticker::new(config.block_duration);
+        let mut timeout = timing::Timeout::new(config.view_change_timeout);
 
         info!("Configuration: {:#?}", config);
 
@@ -61,20 +64,31 @@ impl Engine for PbftEngine {
                 Ok(Update::BlockCommit(block_id)) => node.on_block_commit(block_id),
                 Ok(Update::PeerMessage(message, _sender_id)) => node.on_peer_message(message),
                 Ok(Update::Shutdown) => break,
-                Err(RecvTimeoutError::Timeout) => Ok(()),
+                Err(RecvTimeoutError::Timeout) => Err(PbftError::Timeout),
                 Err(RecvTimeoutError::Disconnected) => {
                     error!("Disconnected from validator");
                     break;
                 }
                 _ => Ok(unimplemented!()),
             } {
-                error!("{}", e);
+                // Do nothing for Timeout errors
+                match e {
+                    PbftError::Timeout => (),
+                    _ => error!("{}", e),
+                }
+            } else {
+                // Receiving messages, everything is A-OK
+                timeout.reset();
             }
 
-            // TODO: fill out this method
             working_ticker.tick(|| {
                 node.update_working_block();
             });
+
+            // Check to see if timeout has expired; initiate ViewChange if necessary
+            if timeout.is_expired() {
+                error!("Timeout expired!!");
+            }
         }
     }
 
