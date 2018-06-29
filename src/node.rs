@@ -17,6 +17,7 @@
 
 use protobuf;
 use protobuf::{Message, ProtobufError};
+use protobuf::RepeatedField;
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,13 +27,14 @@ use std::fmt;
 use sawtooth_sdk::consensus::engine::{Block, BlockId, Error as EngineError, PeerId, PeerMessage};
 use sawtooth_sdk::consensus::service::Service;
 
-use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo};
+use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo,
+PbftViewChange_PrepareMessagePair as PrepareMessagePair, PbftViewChange};
 
 use config::PbftConfig;
 use error::PbftError;
 use message_type::PbftMessageType;
 use pbft_log::PbftLog;
-use state::{PbftPhase, PbftState};
+use state::{PbftPhase, PbftState, PbftMode};
 
 // The actual node
 pub struct PbftNode {
@@ -44,11 +46,12 @@ pub struct PbftNode {
 impl fmt::Display for PbftNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ast = if self.state.is_primary() { "*" } else { " " };
+        let mode = if self.state.mode == PbftMode::Normal { "N" } else { "V" };
 
         write!(
             f,
-            "Node {}{:02} ({:?})",
-            ast, self.state.id, self.state.phase
+            "Node {}{:02} ({:?} {})",
+            ast, self.state.id, self.state.phase, mode
         )
     }
 }
@@ -238,7 +241,30 @@ impl PbftNode {
 
                 _ => warn!("Message type not implemented"),
             }
-        } // if msg_type.is_multicast()
+        } else if msg_type.is_view_change() {
+            info!("{}: Received ViewChange message", self);
+
+            let deser_msg = protobuf::parse_from_bytes::<PbftViewChange>(&msg.content);
+            if let Err(e) = deser_msg {
+                return Err(PbftError::SerializationError(e));
+            }
+            let deser_msg = deser_msg.unwrap();
+
+            self.msg_log.add_view_change(deser_msg.clone());
+            self.state.mode = PbftMode::ViewChange;
+
+            let vc_msgs = self.msg_log.get_view_change(deser_msg.get_info().get_seq_num());
+
+            if vc_msgs.len() < (self.state.f + 1) as usize {
+                return Err(PbftError::WrongNumMessages(
+                    PbftMessageType::ViewChange,
+                    (self.state.f + 1) as usize,
+                    vc_msgs.len(),
+                ));
+            }
+
+            // TODO: broadcast NewView here and change view
+        }
 
         Ok(())
     }
@@ -351,6 +377,38 @@ impl PbftNode {
         }
     }
 
+    // Initiate a view change (this node suspects that the primary is faulty)
+    pub fn start_view_change(&mut self) -> Result<(), PbftError> {
+        if self.state.mode == PbftMode::ViewChange {
+            return Ok(());
+        }
+        info!("{}: Starting view change", self);
+
+        // TODO: use actual checkpoints. For now take current seq num as stable
+        let mut checkpoint_msgs: Vec<PbftMessage> = vec![];
+        // TODO: actually build PrePrepare, Prepare, Checkpoint proofs
+        let mut pairs: Vec<PrepareMessagePair> = vec![];
+
+        let info = make_msg_info(
+                &PbftMessageType::ViewChange,
+                self.state.view,
+                self.state.seq_num,
+                self.state.get_own_peer_id(),
+        );
+
+        let mut vc_msg = PbftViewChange::new();
+        vc_msg.set_info(info);
+        vc_msg.set_checkpoint_messages(RepeatedField::from_vec(checkpoint_msgs));
+        vc_msg.set_prepare_messages(RepeatedField::from_vec(pairs));
+
+        let msg_bytes = vc_msg.write_to_bytes().map_err(|e| PbftError::SerializationError(e));
+
+        match msg_bytes {
+            Err(e) => Err(e),
+            Ok(bytes) => self._broadcast_message(&PbftMessageType::ViewChange, &bytes),
+        }
+    }
+
     // "prepared" predicate
     fn _prepared(&self, deser_msg: &PbftMessage) -> Result<(), PbftError> {
         let info = deser_msg.get_info();
@@ -440,15 +498,23 @@ impl PbftNode {
             block,
         ).unwrap_or(Vec::<u8>::new());
 
+        self._broadcast_message(&msg_type, &msg_bytes)
+    }
+
+    fn _broadcast_message(
+        &mut self,
+        msg_type: &PbftMessageType,
+        msg_bytes: &Vec<u8>,
+    ) -> Result<(), PbftError> {
         // Broadcast to peers
         self.service
-            .broadcast(String::from(&msg_type).as_str(), msg_bytes.clone())
+            .broadcast(String::from(msg_type).as_str(), msg_bytes.clone())
             .unwrap_or_else(|err| error!("Couldn't broadcast: {}", err));
         info!("{}: >>>>>> {:?}", self, msg_type);
 
         // Send to self
         let peer_msg = PeerMessage {
-            message_type: String::from(&msg_type),
+            message_type: String::from(msg_type),
             content: msg_bytes.clone(),
         };
         info!("{}: >self> {:?}", self, msg_type);

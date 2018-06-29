@@ -42,6 +42,12 @@ pub enum PbftPhase {
     Finished,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum PbftMode {
+    Normal,
+    ViewChange,
+}
+
 // Information about the PBFT algorithm's state
 pub struct PbftState {
     // This node's ID
@@ -59,6 +65,9 @@ pub struct PbftState {
 
     // Is this node primary or secondary?
     role: PbftNodeRole,
+
+    // Normal operation or view change
+    pub mode: PbftMode,
 
     // Map of peers in the network, including ourselves
     network_node_ids: HashMap<u64, PeerId>,
@@ -94,6 +103,7 @@ impl PbftState {
             } else {
                 PbftNodeRole::Secondary
             },
+            mode: PbftMode::Normal,
             f: ((peer_id_map.len() - 1) / 3) as u64,
             network_node_ids: peer_id_map,
         }

@@ -95,7 +95,7 @@ impl Engine for PbftEngine {
 
             // Check to see if timeout has expired; initiate ViewChange if necessary
             if timeout.is_expired() {
-                error!("Timeout expired!!");
+                node.start_view_change().unwrap_or_else(|e| error!("{}", e));
             }
         }
     }
