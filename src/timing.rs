@@ -71,4 +71,10 @@ impl Timeout {
             TimeoutState::Expired => true,
         }
     }
+
+    pub fn reset(&mut self) {
+        self.state = TimeoutState::Active;
+        self.duration = self.duration;
+        self.start = Instant::now();
+    }
 }
