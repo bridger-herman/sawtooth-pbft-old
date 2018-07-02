@@ -27,7 +27,7 @@ use std::fmt;
 use sawtooth_sdk::consensus::engine::{Block, BlockId, Error as EngineError, PeerId, PeerMessage};
 use sawtooth_sdk::consensus::service::Service;
 
-use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftViewChange,
+use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftViewChange, PbftNewView,
                            PbftViewChange_PrepareMessagePair as PrepareMessagePair};
 
 use config::PbftConfig;
@@ -39,7 +39,7 @@ use state::{PbftMode, PbftPhase, PbftState};
 // The actual node
 pub struct PbftNode {
     service: Box<Service>,
-    state: PbftState,
+    pub state: PbftState,
     msg_log: PbftLog,
 }
 
@@ -54,8 +54,8 @@ impl fmt::Display for PbftNode {
 
         write!(
             f,
-            "Node {}{:02} ({:?} {})",
-            ast, self.state.id, self.state.phase, mode
+            "Node {}{:02} ({:?} {} {})",
+            ast, self.state.id, self.state.phase, mode, self.state.view
         )
     }
 }
@@ -262,20 +262,49 @@ impl PbftNode {
             let deser_msg = deser_msg.unwrap();
 
             self.msg_log.add_view_change(deser_msg.clone());
-            self.state.mode = PbftMode::ViewChange;
 
-            let vc_msgs = self.msg_log
-                .get_view_change(deser_msg.get_info().get_seq_num());
+            info!("{}", self.msg_log);
 
-            if vc_msgs.len() < (self.state.f + 1) as usize {
-                return Err(PbftError::WrongNumMessages(
-                    PbftMessageType::ViewChange,
-                    (self.state.f + 1) as usize,
-                    vc_msgs.len(),
-                ));
+            {
+                let vc_msgs = self.msg_log
+                    .get_view_change(deser_msg.get_info().get_seq_num());
+
+                if vc_msgs.len() < (2 * self.state.f + 1) as usize {
+                    return Err(PbftError::WrongNumMessages(
+                            PbftMessageType::ViewChange,
+                            (2 * self.state.f + 1) as usize,
+                            vc_msgs.len(),
+                            ));
+                }
             }
-            // TODO: broadcast NewView here and change view
 
+            // Advance this node's view
+            self.state.view += 1;
+
+            // ViewChange messages
+            let mut vc_msgs: Vec<PbftViewChange> = vec![];
+
+            // PrePrepare messages - requests that need to get re-processed
+            let mut pre_prep_msgs: Vec<PbftMessage> = vec![];
+
+            let info = make_msg_info(
+                &PbftMessageType::NewView,
+                self.state.view,
+                self.state.seq_num,
+                self.state.get_own_peer_id()
+            );
+
+            let mut nv_msg = PbftNewView::new();
+            nv_msg.set_info(info);
+            nv_msg.set_view_change_messages(RepeatedField::from_vec(vc_msgs));
+            nv_msg.set_pre_prepare_messages(RepeatedField::from_vec(pre_prep_msgs));
+
+            let msg_bytes = nv_msg.write_to_bytes().map_err(|e| PbftError::SerializationError(e));
+
+            match msg_bytes {
+                Err(e) => return Err(e),
+                Ok(bytes) => self._broadcast_message(&PbftMessageType::NewView, &bytes),
+            };
         } else if msg_type.is_pulse() {
             // Directly deserialize into PeerId
             let primary = PeerId::from(msg.content);
@@ -419,6 +448,7 @@ impl PbftNode {
             return Ok(());
         }
         info!("{}: Starting view change", self);
+        self.state.mode = PbftMode::ViewChange;
 
         // TODO: use actual checkpoints. For now take current seq num as stable
         let mut checkpoint_msgs: Vec<PbftMessage> = vec![];

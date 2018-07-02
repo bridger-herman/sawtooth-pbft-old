@@ -50,9 +50,9 @@ impl Engine for PbftEngine {
 
         let mut working_ticker = timing::Ticker::new(config.block_duration);
 
-        info!("Configuration: {:#?}", config);
-
         let mut node = PbftNode::new(self.id, &config, service);
+
+        info!("Starting state: {:#?}", node.state);
 
         // Event loop. Keep going until we receive a shutdown message.
         loop {

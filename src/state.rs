@@ -25,7 +25,7 @@ use timing::Timeout;
 
 // Possible roles for a node
 // Primary is in charge of making consensus decisions
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum PbftNodeRole {
     Primary,
     Secondary,
@@ -50,6 +50,7 @@ pub enum PbftMode {
 }
 
 // Information about the PBFT algorithm's state
+#[derive(Debug)]
 pub struct PbftState {
     // This node's ID
     pub id: u64,
@@ -91,6 +92,12 @@ impl PbftState {
             .map(|(peer_id, node_id)| (node_id, peer_id))
             .collect();
 
+        // Maximum number of faulty nodes in this network
+        let f = ((peer_id_map.len() - 1) / 3) as u64;
+        if f == 0 {
+            warn!("This network does not contain enough nodes to be fault tolerant");
+        }
+
         PbftState {
             id: id,
             seq_num: 0, // Default to unknown
@@ -102,7 +109,7 @@ impl PbftState {
                 PbftNodeRole::Secondary
             },
             mode: PbftMode::Normal,
-            f: ((peer_id_map.len() - 1) / 3) as u64,
+            f: f,
             network_node_ids: peer_id_map,
             timeout: Timeout::new(config.view_change_timeout.clone()),
         }
