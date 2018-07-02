@@ -36,6 +36,7 @@ pub struct PbftConfig {
     pub message_timeout: Duration,
 
     // How long to wait to initiate a ViewChange if we suspect the primary's faulty
+    // Should be longer than block_duration
     pub view_change_timeout: Duration,
 
     // How many requests in between each checkpoint
@@ -51,7 +52,7 @@ impl PbftConfig {
             peers: HashMap::new(),
             block_duration: Duration::from_millis(2000),
             message_timeout: Duration::from_millis(10),
-            view_change_timeout: Duration::from_millis(1000),
+            view_change_timeout: Duration::from_millis(4000),
             checkpoint_period: 100,
             max_log_size: 1000,
         }
