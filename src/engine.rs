@@ -33,10 +33,7 @@ pub struct PbftEngine {
 
 impl PbftEngine {
     pub fn new(id: u64, dead: bool) -> Self {
-        PbftEngine {
-            id: id,
-            dead: dead,
-        }
+        PbftEngine { id: id, dead: dead }
     }
 }
 
@@ -52,7 +49,6 @@ impl Engine for PbftEngine {
         let config = config::load_pbft_config(chain_head.block_id, &mut service);
 
         let mut working_ticker = timing::Ticker::new(config.block_duration);
-        let mut timeout = timing::Timeout::new(config.view_change_timeout);
 
         info!("Configuration: {:#?}", config);
 
@@ -84,9 +80,6 @@ impl Engine for PbftEngine {
                     PbftError::Timeout => (),
                     _ => error!("{}", e),
                 }
-            } else {
-                // Receiving messages, everything is A-OK
-                timeout.reset();
             }
 
             working_ticker.tick(|| {
@@ -94,7 +87,7 @@ impl Engine for PbftEngine {
             });
 
             // Check to see if timeout has expired; initiate ViewChange if necessary
-            if timeout.is_expired() {
+            if node.check_timeout_expired() {
                 node.start_view_change().unwrap_or_else(|e| error!("{}", e));
             }
         }

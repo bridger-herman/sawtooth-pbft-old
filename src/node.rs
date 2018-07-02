@@ -16,8 +16,8 @@
  */
 
 use protobuf;
-use protobuf::{Message, ProtobufError};
 use protobuf::RepeatedField;
+use protobuf::{Message, ProtobufError};
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,14 +27,14 @@ use std::fmt;
 use sawtooth_sdk::consensus::engine::{Block, BlockId, Error as EngineError, PeerId, PeerMessage};
 use sawtooth_sdk::consensus::service::Service;
 
-use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo,
-PbftViewChange_PrepareMessagePair as PrepareMessagePair, PbftViewChange};
+use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftViewChange,
+                           PbftViewChange_PrepareMessagePair as PrepareMessagePair};
 
 use config::PbftConfig;
 use error::PbftError;
 use message_type::PbftMessageType;
 use pbft_log::PbftLog;
-use state::{PbftPhase, PbftState, PbftMode};
+use state::{PbftMode, PbftPhase, PbftState};
 
 // The actual node
 pub struct PbftNode {
@@ -46,7 +46,11 @@ pub struct PbftNode {
 impl fmt::Display for PbftNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ast = if self.state.is_primary() { "*" } else { " " };
-        let mode = if self.state.mode == PbftMode::Normal { "N" } else { "V" };
+        let mode = if self.state.mode == PbftMode::Normal {
+            "N"
+        } else {
+            "V"
+        };
 
         write!(
             f,
@@ -87,6 +91,12 @@ impl PbftNode {
                 return Err(PbftError::SerializationError(e));
             }
             let deser_msg = deser_msg.unwrap();
+
+            // Received a message from the primary, timeout can be reset
+            let primary = self.state.get_primary_peer_id();
+            if deser_msg.get_info().get_signer_id().to_vec() == Vec::<u8>::from(primary) {
+                self.state.timeout.reset();
+            }
 
             // Don't process message if we're not ready for it.
             // i.e. Don't process prepare messages if we're not in the PbftPhase::Preparing
@@ -242,6 +252,7 @@ impl PbftNode {
                 _ => warn!("Message type not implemented"),
             }
         } else if msg_type.is_view_change() {
+            // TODO: Network still functions with only one node... Shouldn't do that
             info!("{}: Received ViewChange message", self);
 
             let deser_msg = protobuf::parse_from_bytes::<PbftViewChange>(&msg.content);
@@ -253,7 +264,8 @@ impl PbftNode {
             self.msg_log.add_view_change(deser_msg.clone());
             self.state.mode = PbftMode::ViewChange;
 
-            let vc_msgs = self.msg_log.get_view_change(deser_msg.get_info().get_seq_num());
+            let vc_msgs = self.msg_log
+                .get_view_change(deser_msg.get_info().get_seq_num());
 
             if vc_msgs.len() < (self.state.f + 1) as usize {
                 return Err(PbftError::WrongNumMessages(
@@ -262,8 +274,16 @@ impl PbftNode {
                     vc_msgs.len(),
                 ));
             }
-
             // TODO: broadcast NewView here and change view
+
+        } else if msg_type.is_pulse() {
+            // Directly deserialize into PeerId
+            let primary = PeerId::from(msg.content);
+
+            // Reset the timer if the PeerId checks out
+            if self.state.get_primary_peer_id() == primary {
+                self.state.timeout.reset();
+            }
         }
 
         Ok(())
@@ -363,6 +383,17 @@ impl PbftNode {
     // The primary tries to finalize a block every so often
     pub fn update_working_block(&mut self) {
         if self.state.is_primary() {
+            // First, get our PeerId
+            let peer_id = self.state.get_own_peer_id();
+
+            // Then send a pulse to all nodes to tell them that we're alive
+            // and sign it with our PeerId
+            self._broadcast_message(
+                &PbftMessageType::Pulse,
+                &Vec::<u8>::from(peer_id),
+            );
+
+            // Try to finalize a block
             if self.state.phase == PbftPhase::NotStarted {
                 match self.service.finalize_block(vec![]) {
                     Ok(block_id) => {
@@ -375,6 +406,11 @@ impl PbftNode {
                 }
             }
         }
+    }
+
+    // Check to see the state of the primary timeout
+    pub fn check_timeout_expired(&mut self) -> bool {
+        self.state.timeout.is_expired()
     }
 
     // Initiate a view change (this node suspects that the primary is faulty)
@@ -390,10 +426,10 @@ impl PbftNode {
         let mut pairs: Vec<PrepareMessagePair> = vec![];
 
         let info = make_msg_info(
-                &PbftMessageType::ViewChange,
-                self.state.view,
-                self.state.seq_num,
-                self.state.get_own_peer_id(),
+            &PbftMessageType::ViewChange,
+            self.state.view,
+            self.state.seq_num,
+            self.state.get_own_peer_id(),
         );
 
         let mut vc_msg = PbftViewChange::new();
@@ -401,7 +437,9 @@ impl PbftNode {
         vc_msg.set_checkpoint_messages(RepeatedField::from_vec(checkpoint_msgs));
         vc_msg.set_prepare_messages(RepeatedField::from_vec(pairs));
 
-        let msg_bytes = vc_msg.write_to_bytes().map_err(|e| PbftError::SerializationError(e));
+        let msg_bytes = vc_msg
+            .write_to_bytes()
+            .map_err(|e| PbftError::SerializationError(e));
 
         match msg_bytes {
             Err(e) => Err(e),

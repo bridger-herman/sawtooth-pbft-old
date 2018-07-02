@@ -21,6 +21,7 @@ use sawtooth_sdk::consensus::engine::PeerId;
 
 use config::PbftConfig;
 use message_type::PbftMessageType;
+use timing::Timeout;
 
 // Possible roles for a node
 // Primary is in charge of making consensus decisions
@@ -74,6 +75,11 @@ pub struct PbftState {
 
     // The maximum number of faulty nodes in the network
     pub f: u64,
+
+    // Timer used to keep track of whether or not this node has received timely messages from the
+    // primary. If a message hasn't been received in a certain amount of time, then this node will
+    // initiate a view change.
+    pub timeout: Timeout,
 }
 
 impl PbftState {
@@ -85,20 +91,12 @@ impl PbftState {
             .map(|(peer_id, node_id)| (node_id, peer_id))
             .collect();
 
-        // TODO: update this to reflect view
-        let current_primary = config
-            .peers
-            .iter()
-            .map(|(_peer_id, node_id)| node_id)
-            .min()
-            .unwrap_or(&1);
-
         PbftState {
             id: id,
             seq_num: 0, // Default to unknown
-            view: 1,
+            view: 0,    // Node ID 0 is default primary
             phase: PbftPhase::NotStarted,
-            role: if &id == current_primary {
+            role: if id == 0 {
                 PbftNodeRole::Primary
             } else {
                 PbftNodeRole::Secondary
@@ -106,6 +104,7 @@ impl PbftState {
             mode: PbftMode::Normal,
             f: ((peer_id_map.len() - 1) / 3) as u64,
             network_node_ids: peer_id_map,
+            timeout: Timeout::new(config.view_change_timeout.clone()),
         }
     }
 
@@ -137,6 +136,11 @@ impl PbftState {
 
     pub fn get_own_peer_id(&self) -> PeerId {
         self.network_node_ids[&self.id].clone()
+    }
+
+    pub fn get_primary_peer_id(&self) -> PeerId {
+        let primary_node_id = self.view % (self.network_node_ids.len() as u64);
+        self.network_node_ids[&primary_node_id].clone() // TODO: remove unwrap
     }
 
     // Tell if this node is currently a primary
