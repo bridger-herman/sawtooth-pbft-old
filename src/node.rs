@@ -270,8 +270,7 @@ impl PbftNode {
             info!("{}", self.msg_log);
 
             {
-                let vc_msgs = self.msg_log
-                    .get_view_change(deser_msg.get_info().get_seq_num());
+                let vc_msgs = self.msg_log.get_view_change(self.state.view);
 
                 if vc_msgs.len() < (2 * self.state.f + 1) as usize {
                     return Err(PbftError::WrongNumMessages(
