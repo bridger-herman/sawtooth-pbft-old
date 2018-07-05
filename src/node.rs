@@ -46,10 +46,10 @@ pub struct PbftNode {
 impl fmt::Display for PbftNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ast = if self.state.is_primary() { "*" } else { " " };
-        let mode = if self.state.mode == PbftMode::Normal {
-            "N"
-        } else {
-            "V"
+        let mode = match self.state.mode {
+            PbftMode::Normal => "N",
+            PbftMode::Checkpointing => "C",
+            PbftMode::ViewChange => "V",
         };
 
         write!(
@@ -87,10 +87,6 @@ impl PbftNode {
 
         // Handle a multicast protocol message
         if msg_type.is_multicast() {
-            // Only deal with multicast messages in Normal mode
-            if self.state.mode != PbftMode::Normal {
-                return Ok(());
-            }
 
             let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
             if let Err(e) = deser_msg {
@@ -106,8 +102,9 @@ impl PbftNode {
 
             // Don't process message if we're not ready for it.
             // i.e. Don't process prepare messages if we're not in the PbftPhase::Preparing
+            // Discard all multicast messages that come while we're in a ViewChange
             let expecting_type = self.state.check_msg_type();
-            if expecting_type != msg_type {
+            if expecting_type != msg_type && self.state.mode != PbftMode::ViewChange {
                 debug!(
                     "{}: !!!!!! [Node {:02}]: {:?} (in mode {:?})",
                     self,
@@ -184,6 +181,7 @@ impl PbftNode {
 
                             // ...then update the BlockNew message we received with the correct
                             // sequence number
+                            // TODO: This is sometimes not 1? (like 12 for instance)
                             let num_updated = self.msg_log
                                 .fix_seq_nums(&PbftMessageType::BlockNew, info.get_seq_num());
                             info!("The log updated {} BlockNew messages", num_updated);
@@ -349,30 +347,56 @@ impl PbftNode {
                 Err(e) => return Err(e),
                 Ok(bytes) => self._broadcast_message(&PbftMessageType::NewView, &bytes),
             };
+
         } else if msg_type.is_new_view() {
-            info!("{}: Received NewView message", self);
             // TODO: Here is where we should restart the multicast protocol for messages since the
             // last stable checkpoint
-        } else if msg_type.is_checkpoint() {
-            info!("{}: Received Checkpoint message", self);
+            info!("{}: Received NewView message", self);
 
+        } else if msg_type.is_checkpoint() {
             let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
             if let Err(e) = deser_msg {
                 return Err(PbftError::SerializationError(e));
             }
             let deser_msg = deser_msg.unwrap();
 
+            info!("{}: Received Checkpoint message from {:02}",
+                  self, self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()));
+
+            if let Some(ref checkpoint) = self.msg_log.latest_stable_checkpoint {
+                if checkpoint.seq_num >= deser_msg.get_info().get_seq_num() {
+                    debug!("{}: Already at a stable checkpoint with this sequence number or past it!", self);
+                    return Ok(())
+                }
+            }
+
             // Add message to the log
             self.msg_log.add_message(deser_msg.clone());
 
-            self._check_msg_against_log(&deser_msg, true, None)?;
+            // If we're a secondary, forward the message to everyone else in the network (resign it)
+            if !self.state.is_primary() && self.state.mode != PbftMode::Checkpointing {
+                self.state.pre_checkpoint_mode = self.state.mode;
+                self.state.mode = PbftMode::Checkpointing;
+                self._broadcast_pbft_message(
+                    deser_msg.get_info().get_seq_num(),
+                    PbftMessageType::Checkpoint,
+                    PbftBlock::new(),
+                )?;
+            }
 
-            info!(
-                "{}: Reached stable checkpoint; garbage collecting logs",
-                self
-            );
-            self.msg_log
-                .garbage_collect(deser_msg.get_info().get_seq_num());
+            if self.state.mode == PbftMode::Checkpointing {
+                self._check_msg_against_log(&deser_msg, true, None)?;
+                info!(
+                    "{}: Reached stable checkpoint (seq num {}); garbage collecting logs",
+                    self,
+                    deser_msg.get_info().get_seq_num()
+                );
+                self.msg_log
+                    .garbage_collect(deser_msg.get_info().get_seq_num());
+
+                self.state.mode = self.state.pre_checkpoint_mode;
+            }
+
         } else if msg_type.is_pulse() {
             // Directly deserialize into PeerId
             let primary = PeerId::from(msg.content);
@@ -509,9 +533,18 @@ impl PbftNode {
     }
 
     // Start the checkpoint process
+    // Primaries start the checkpoint to ensure sequence number correctness
     pub fn start_checkpoint(&mut self) -> Result<(), PbftError> {
+        if !self.state.is_primary() {
+            return Ok(());
+        }
+        if self.state.mode == PbftMode::Checkpointing {
+            return Ok(());
+        }
+
+        self.state.pre_checkpoint_mode = self.state.mode;
+        self.state.mode = PbftMode::Checkpointing;
         info!("{}: Starting checkpoint", self);
-        // TODO: Construct actual block
         let s = self.state.seq_num;
         self._broadcast_pbft_message(s, PbftMessageType::Checkpoint, PbftBlock::new())
     }
@@ -521,7 +554,6 @@ impl PbftNode {
             info!("{}: Popping unread {}", self, msg.message_type);
             self.on_peer_message(msg)?
         }
-
         Ok(())
     }
 
@@ -661,7 +693,7 @@ impl PbftNode {
     ) -> Result<(), PbftError> {
         let expected_type = self.state.check_msg_type();
         // Make sure that we should be sending messages of this type
-        if expected_type != PbftMessageType::Unset && msg_type != expected_type {
+        if msg_type.is_multicast() && msg_type != expected_type {
             info!("{}: xxxxxx {:?} not sending", self, msg_type);
             return Ok(());
         }

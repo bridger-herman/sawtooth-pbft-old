@@ -27,6 +27,13 @@ use sawtooth_sdk::consensus::engine::PeerMessage;
 use config::PbftConfig;
 use message_type::PbftMessageType;
 
+// TODO: move this somewhere else
+// State keeps track of the last stable checkpoint
+pub struct PbftStableCheckpoint {
+    pub seq_num: u64,
+    pub checkpoint_messages: Vec<PbftMessage>,
+}
+
 // Struct for storing messages that a PbftNode receives
 pub struct PbftLog {
     // Generic messages (BlockNew, PrePrepare, Prepare, Commit, CommitFinal, Checkpoint)
@@ -52,13 +59,13 @@ pub struct PbftLog {
 
     // Unread messages
     unreads: VecDeque<PeerMessage>,
+
+    // The most recent checkpoint that contains proof
+    pub latest_stable_checkpoint: Option<PbftStableCheckpoint>,
 }
 
 impl fmt::Display for PbftLog {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // let msg_string_vec: Vec<String> = self.view_changes
-            // .iter()
-            // .map(|msg: &PbftViewChange| -> String {
         let msg_string_vec: Vec<String> = self.messages
             .iter()
             .map(|msg: &PbftMessage| -> String {
@@ -94,6 +101,7 @@ impl PbftLog {
             high_water_mark: config.max_log_size,
             max_log_size: config.max_log_size,
             unreads: VecDeque::new(),
+            latest_stable_checkpoint: None,
         }
     }
 
@@ -176,12 +184,23 @@ impl PbftLog {
         self.cycles > self.checkpoint_period
     }
 
-    // Garbage collect the log
+    // Garbage collect the log, and create a stable checkpoint
     pub fn garbage_collect(&mut self, stable_checkpoint: u64) {
         // For now, just update low/high water marks
         self.low_water_mark = stable_checkpoint;
         self.high_water_mark = self.low_water_mark + self.max_log_size;
         self.cycles = 0;
+
+        // Update the stable checkpoint
+        let cp_msgs: Vec<PbftMessage> = self.get_messages_of_type(&PbftMessageType::Checkpoint, stable_checkpoint)
+            .iter()
+            .map(|&msg| msg.clone())
+            .collect();
+        let cp = PbftStableCheckpoint {
+            seq_num: stable_checkpoint,
+            checkpoint_messages: cp_msgs,
+        };
+        self.latest_stable_checkpoint = Some(cp);
     }
 
     pub fn push_unread(&mut self, msg: PeerMessage) {
