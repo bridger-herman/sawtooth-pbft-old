@@ -15,8 +15,8 @@
  * -----------------------------------------------------------------------------
  */
 
-use std::fmt;
 use std::collections::VecDeque;
+use std::fmt;
 
 use hex;
 

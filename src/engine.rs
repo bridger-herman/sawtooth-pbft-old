@@ -88,14 +88,17 @@ impl Engine for PbftEngine {
 
             // Check to see if timeout has expired; initiate ViewChange if necessary
             if node.check_timeout_expired() {
-                node.start_view_change().unwrap_or_else(|e| error!("Couldn't start view change: {}", e));
+                node.start_view_change()
+                    .unwrap_or_else(|e| error!("Couldn't start view change: {}", e));
             }
 
             if node.msg_log.at_checkpoint() {
-                node.start_checkpoint().unwrap_or_else(|e| error!("Couldn't start checkpoint: {}", e));
+                node.start_checkpoint()
+                    .unwrap_or_else(|e| error!("Couldn't start checkpoint: {}", e));
             }
 
-            node.retry_unread().unwrap_or_else(|e| error!("Couldn't retry unread: {}", e));
+            node.retry_unread()
+                .unwrap_or_else(|e| error!("Couldn't retry unread: {}", e));
         }
     }
 
