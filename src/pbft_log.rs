@@ -20,7 +20,7 @@ use std::fmt;
 
 use hex;
 
-use protos::pbft_message::{PbftMessage, PbftNewView, PbftViewChange};
+use protos::pbft_message::{PbftMessage, PbftMessageInfo, PbftNewView, PbftViewChange};
 
 use sawtooth_sdk::consensus::engine::PeerMessage;
 
@@ -32,6 +32,23 @@ use message_type::PbftMessageType;
 pub struct PbftStableCheckpoint {
     pub seq_num: u64,
     pub checkpoint_messages: Vec<PbftMessage>,
+}
+
+// TODO: Put these somewhere else
+pub trait PbftGetInfo<'a> {
+    fn get_msg_info(&self) -> &'a PbftMessageInfo;
+}
+
+impl<'a> PbftGetInfo<'a> for &'a PbftMessage {
+    fn get_msg_info(&self) -> &'a PbftMessageInfo {
+        self.get_info()
+    }
+}
+
+impl<'a> PbftGetInfo<'a> for &'a PbftViewChange {
+    fn get_msg_info(&self) -> &'a PbftMessageInfo {
+        self.get_info()
+    }
 }
 
 // Struct for storing messages that a PbftNode receives
@@ -129,14 +146,43 @@ impl PbftLog {
         &self,
         msg_type: &PbftMessageType,
         sequence_number: u64,
+        view: u64,
     ) -> Vec<&PbftMessage> {
         self.messages
             .iter()
             .filter(|&msg| {
-                (*msg).get_info().get_msg_type() == String::from(msg_type)
-                    && (*msg).get_info().get_seq_num() == sequence_number
+                let info = (*msg).get_info();
+                info.get_msg_type() == String::from(msg_type)
+                    && info.get_seq_num() == sequence_number
+                    && info.get_view() == view
             })
             .collect()
+    }
+
+    pub fn get_message_infos(
+        &self,
+        msg_type: &PbftMessageType,
+        sequence_number: u64,
+        view: u64,
+    ) -> Vec<&PbftMessageInfo> {
+        let mut infos = vec![];
+        for msg in self.messages.iter() {
+            let info = msg.get_info();
+            if info.get_msg_type() == String::from(msg_type)
+                && info.get_seq_num() == sequence_number && info.get_view() == view
+            {
+                infos.push(info);
+            }
+        }
+        for msg in self.view_changes.iter() {
+            let info = msg.get_info();
+            if info.get_msg_type() == String::from(msg_type)
+                && info.get_seq_num() == sequence_number && info.get_view() == view
+            {
+                infos.push(info);
+            }
+        }
+        infos
     }
 
     // Fix sequence numbers of generic messages that are defaulted to zero
@@ -185,17 +231,18 @@ impl PbftLog {
     }
 
     // Garbage collect the log, and create a stable checkpoint
-    pub fn garbage_collect(&mut self, stable_checkpoint: u64) {
+    pub fn garbage_collect(&mut self, stable_checkpoint: u64, view: u64) {
         // For now, just update low/high water marks
         self.low_water_mark = stable_checkpoint;
         self.high_water_mark = self.low_water_mark + self.max_log_size;
         self.cycles = 0;
 
         // Update the stable checkpoint
-        let cp_msgs: Vec<PbftMessage> = self.get_messages_of_type(&PbftMessageType::Checkpoint, stable_checkpoint)
-            .iter()
-            .map(|&msg| msg.clone())
-            .collect();
+        let cp_msgs: Vec<PbftMessage> =
+            self.get_messages_of_type(&PbftMessageType::Checkpoint, stable_checkpoint, view)
+                .iter()
+                .map(|&msg| msg.clone())
+                .collect();
         let cp = PbftStableCheckpoint {
             seq_num: stable_checkpoint,
             checkpoint_messages: cp_msgs,

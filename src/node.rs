@@ -33,7 +33,7 @@ use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftNewView,
 use config::PbftConfig;
 use error::PbftError;
 use message_type::PbftMessageType;
-use pbft_log::PbftLog;
+use pbft_log::{PbftGetInfo, PbftLog};
 use state::{PbftMode, PbftPhase, PbftState};
 
 // The actual node
@@ -87,7 +87,6 @@ impl PbftNode {
 
         // Handle a multicast protocol message
         if msg_type.is_multicast() {
-
             let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
             if let Err(e) = deser_msg {
                 return Err(PbftError::SerializationError(e));
@@ -144,8 +143,11 @@ impl PbftNode {
                     // Immutably borrow self for a limited time
                     {
                         // Check that this PrePrepare doesn't already exist
-                        let existing_pre_prep_msgs = self.msg_log
-                            .get_messages_of_type(&PbftMessageType::PrePrepare, info.get_seq_num());
+                        let existing_pre_prep_msgs = self.msg_log.get_messages_of_type(
+                            &PbftMessageType::PrePrepare,
+                            info.get_seq_num(),
+                            info.get_view(),
+                        );
 
                         if existing_pre_prep_msgs.len() > 0 {
                             return Err(PbftError::MessageExists(PbftMessageType::PrePrepare));
@@ -158,6 +160,7 @@ impl PbftNode {
                             let block_new_msgs = self.msg_log.get_messages_of_type(
                                 &PbftMessageType::BlockNew,
                                 info.get_seq_num(),
+                                info.get_view(),
                             );
 
                             if block_new_msgs.len() != 1 {
@@ -240,16 +243,10 @@ impl PbftNode {
                     let commit_final_msgs = self.msg_log.get_messages_of_type(
                         &PbftMessageType::CommitFinal,
                         deser_msg.get_info().get_seq_num(),
+                        deser_msg.get_info().get_view(),
                     );
 
-                    let diff_commit_final_msgs = num_unique_signers(&commit_final_msgs);
-                    if diff_commit_final_msgs < self.state.f + 1 {
-                        return Err(PbftError::WrongNumMessages(
-                            PbftMessageType::CommitFinal,
-                            (self.state.f + 1) as usize,
-                            diff_commit_final_msgs as usize,
-                        ));
-                    }
+                    self._check_msg_against_log(&&deser_msg, true, Some(self.state.f + 1))?;
 
                     self.state.phase = PbftPhase::Finished;
 
@@ -279,16 +276,12 @@ impl PbftNode {
             {
                 self.msg_log.add_view_change(deser_msg.clone());
 
-                let vc_msgs = self.msg_log.get_view_change(self.state.view);
-                let num_vc_msgs = num_unique_signers_vc(&vc_msgs);
-
-                if num_vc_msgs < 2 * self.state.f + 1 {
-                    return Err(PbftError::WrongNumMessages(
-                        PbftMessageType::ViewChange,
-                        (2 * self.state.f + 1) as usize,
-                        num_vc_msgs as usize,
-                    ));
-                }
+                let infos = self.msg_log.get_message_infos(
+                    &PbftMessageType::ViewChange,
+                    self.state.seq_num,
+                    self.state.view,
+                );
+                self._check_msg_against_log(&&deser_msg, true, None)?;
 
                 // Advance this node's view and upgrade it to primary, if its ID is correct
                 self.state.view += 1;
@@ -314,10 +307,11 @@ impl PbftNode {
                 }
 
                 // ViewChange messages
-                let mut vc_msgs_send: Vec<PbftViewChange> = vec![];
-                for msg in vc_msgs {
-                    vc_msgs_send.push(msg.clone());
-                }
+                let vc_msgs_send = self.msg_log
+                    .get_view_change(self.state.view)
+                    .iter()
+                    .map(|&msg| msg.clone())
+                    .collect();
 
                 // PrePrepare messages - requests that need to get re-processed
                 let mut pre_prep_msgs: Vec<PbftMessage> = vec![];
@@ -342,12 +336,10 @@ impl PbftNode {
                 Err(e) => return Err(e),
                 Ok(bytes) => return self._broadcast_message(&PbftMessageType::NewView, &bytes),
             };
-
         } else if msg_type.is_new_view() {
             // TODO: Here is where we should restart the multicast protocol for messages since the
             // last stable checkpoint
             info!("{}: Received NewView message", self);
-
         } else if msg_type.is_checkpoint() {
             let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
             if let Err(e) = deser_msg {
@@ -355,13 +347,20 @@ impl PbftNode {
             }
             let deser_msg = deser_msg.unwrap();
 
-            info!("{}: Received Checkpoint message from {:02}",
-                  self, self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()));
+            info!(
+                "{}: Received Checkpoint message from {:02}",
+                self,
+                self.state
+                    .get_node_id_from_bytes(deser_msg.get_info().get_signer_id())
+            );
 
             if let Some(ref checkpoint) = self.msg_log.latest_stable_checkpoint {
                 if checkpoint.seq_num >= deser_msg.get_info().get_seq_num() {
-                    debug!("{}: Already at a stable checkpoint with this sequence number or past it!", self);
-                    return Ok(())
+                    debug!(
+                        "{}: Already at a stable checkpoint with this sequence number or past it!",
+                        self
+                    );
+                    return Ok(());
                 }
             }
 
@@ -380,18 +379,19 @@ impl PbftNode {
             }
 
             if self.state.mode == PbftMode::Checkpointing {
-                self._check_msg_against_log(&deser_msg, true, None)?;
+                self._check_msg_against_log(&&deser_msg, true, None)?;
                 info!(
                     "{}: Reached stable checkpoint (seq num {}); garbage collecting logs",
                     self,
                     deser_msg.get_info().get_seq_num()
                 );
-                self.msg_log
-                    .garbage_collect(deser_msg.get_info().get_seq_num());
+                self.msg_log.garbage_collect(
+                    deser_msg.get_info().get_seq_num(),
+                    deser_msg.get_info().get_view(),
+                );
 
                 self.state.mode = self.state.pre_checkpoint_mode;
             }
-
         } else if msg_type.is_pulse() {
             // Directly deserialize into PeerId
             let primary = PeerId::from(msg.content);
@@ -597,8 +597,11 @@ impl PbftNode {
     // "prepared" predicate
     fn _prepared(&self, deser_msg: &PbftMessage) -> Result<(), PbftError> {
         let info = deser_msg.get_info();
-        let block_new_msgs = self.msg_log
-            .get_messages_of_type(&PbftMessageType::BlockNew, info.get_seq_num());
+        let block_new_msgs = self.msg_log.get_messages_of_type(
+            &PbftMessageType::BlockNew,
+            info.get_seq_num(),
+            info.get_view(),
+        );
         if block_new_msgs.len() != 1 {
             return Err(PbftError::WrongNumMessages(
                 PbftMessageType::BlockNew,
@@ -607,8 +610,11 @@ impl PbftNode {
             ));
         }
 
-        let pre_prep_msgs = self.msg_log
-            .get_messages_of_type(&PbftMessageType::PrePrepare, info.get_seq_num());
+        let pre_prep_msgs = self.msg_log.get_messages_of_type(
+            &PbftMessageType::PrePrepare,
+            info.get_seq_num(),
+            info.get_view(),
+        );
         if pre_prep_msgs.len() != 1 {
             return Err(PbftError::WrongNumMessages(
                 PbftMessageType::PrePrepare,
@@ -617,12 +623,17 @@ impl PbftNode {
             ));
         }
 
-        let prep_msgs = self.msg_log
-            .get_messages_of_type(&PbftMessageType::Prepare, info.get_seq_num());
+        let prep_msgs = self.msg_log.get_messages_of_type(
+            &PbftMessageType::Prepare,
+            info.get_seq_num(),
+            info.get_view(),
+        );
         for prep_msg in prep_msgs.iter() {
             // Make sure the contents match
-            if !messages_match(prep_msg, pre_prep_msgs[0])
-                || !messages_match(prep_msg, block_new_msgs[0])
+            if (!message_infos_match(prep_msg.get_info(), &pre_prep_msgs[0].get_info())
+                && prep_msg.get_block() != pre_prep_msgs[0].get_block())
+                || (!message_infos_match(prep_msg.get_info(), block_new_msgs[0].get_info())
+                    && prep_msg.get_block() != block_new_msgs[0].get_block())
             {
                 return Err(PbftError::MessageMismatch(PbftMessageType::Prepare));
             }
@@ -635,8 +646,11 @@ impl PbftNode {
 
     // "committed" predicate
     fn _committed(&self, deser_msg: &PbftMessage) -> Result<(), PbftError> {
-        let commit_msgs = self.msg_log
-            .get_messages_of_type(&PbftMessageType::Commit, deser_msg.get_info().get_seq_num());
+        let commit_msgs = self.msg_log.get_messages_of_type(
+            &PbftMessageType::Commit,
+            deser_msg.get_info().get_seq_num(),
+            deser_msg.get_info().get_view(),
+        );
 
         self._check_msg_against_log(&deser_msg, true, None)?;
 
@@ -644,32 +658,34 @@ impl PbftNode {
     }
 
     // Check an incoming message against its counterparts in the message log
-    fn _check_msg_against_log(
+    fn _check_msg_against_log<'a, T: PbftGetInfo<'a>>(
         &self,
-        message: &PbftMessage,
+        message: &'a T,
         check_match: bool,
         num_cutoff: Option<u64>,
     ) -> Result<(), PbftError> {
         let num_cutoff = num_cutoff.unwrap_or(2 * self.state.f + 1);
-        let msg_type = PbftMessageType::from(message.get_info().get_msg_type());
+        let msg_type = PbftMessageType::from(message.get_msg_info().get_msg_type());
 
-        let cp_msgs = self.msg_log.get_messages_of_type(
+        let msg_infos: Vec<&PbftMessageInfo> = self.msg_log.get_message_infos(
             &msg_type,
-            message.get_info().get_seq_num(),
+            message.get_msg_info().get_seq_num(),
+            message.get_msg_info().get_view(),
         );
-        let num_cp_msgs = num_unique_signers(&cp_msgs);
-        if num_cp_msgs < 2 * self.state.f + 1 {
+
+        let num_cp_msgs = num_unique_signers(&msg_infos);
+        if num_cp_msgs < num_cutoff {
             return Err(PbftError::WrongNumMessages(
                 msg_type,
-                (2 * self.state.f + 1) as usize,
+                num_cutoff as usize,
                 num_cp_msgs as usize,
             ));
         }
 
         if check_match {
-            let non_matches: usize = cp_msgs
+            let non_matches: usize = msg_infos
                 .iter()
-                .filter(|&m| !messages_match(message, m))
+                .filter(|&m| !message_infos_match(message.get_msg_info(), m))
                 .count();
             if non_matches > 0 {
                 return Err(PbftError::MessageMismatch(msg_type));
@@ -728,11 +744,8 @@ impl PbftNode {
 }
 
 // TODO: break these out into better places
-fn messages_match(m1: &PbftMessage, m2: &PbftMessage) -> bool {
-    let (info1, info2) = (m1.get_info(), m2.get_info());
-
-    info1.get_view() == info2.get_view() && info1.get_seq_num() == info2.get_seq_num()
-        && m1.get_block() == m2.get_block()
+fn message_infos_match(m1: &PbftMessageInfo, m2: &PbftMessageInfo) -> bool {
+    m1.get_view() == m2.get_view() && m1.get_seq_num() == m2.get_seq_num()
 }
 
 fn make_msg_info(
@@ -767,26 +780,12 @@ fn pbft_block_from_block(block: Block) -> PbftBlock {
 }
 
 // Make sure messages are all from different nodes
-fn num_unique_signers(msg_list: &Vec<&PbftMessage>) -> u64 {
+fn num_unique_signers(msg_info_list: &Vec<&PbftMessageInfo>) -> u64 {
     let mut received_from: HashSet<&[u8]> = HashSet::new();
     let mut diff_msgs = 0;
-    for b in msg_list {
+    for info in msg_info_list {
         // If the signer is NOT already in the set
-        if received_from.insert(b.get_info().get_signer_id()) {
-            diff_msgs += 1;
-        }
-    }
-    diff_msgs as u64
-}
-
-// The same thing, for PbftViewChanges.
-// TODO: This can probably be condensed using a technique that I don't know yet
-fn num_unique_signers_vc(msg_list: &Vec<&PbftViewChange>) -> u64 {
-    let mut received_from: HashSet<&[u8]> = HashSet::new();
-    let mut diff_msgs = 0;
-    for b in msg_list {
-        // If the signer is NOT already in the set
-        if received_from.insert(b.get_info().get_signer_id()) {
+        if received_from.insert(info.get_signer_id()) {
             diff_msgs += 1;
         }
     }
