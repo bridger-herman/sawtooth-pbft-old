@@ -48,7 +48,7 @@ fn main() {
         (@arg verbose: -v --verbose +multiple
          "increase output verbosity")
         (@arg ID: +required "the PBFT node's id")
-        (@arg dead: -d "simulate a dead node"))
+        (@arg dead: -d +takes_value "simulate a dead node"))
         .get_matches();
 
     let log_level = match matches.occurrences_of("verbose") {
@@ -65,21 +65,19 @@ fn main() {
     );
 
     let id = value_t!(matches.value_of("ID"), u64).unwrap_or_else(|e| e.exit());
+    let dead = value_t!(matches.value_of("dead"), isize).unwrap_or(-1);
 
     simple_logger::init_with_level(log_level).unwrap();
 
     info!("Sawtooth PBFT Engine ({})", env!("CARGO_PKG_VERSION"));
 
-    let dead = matches.occurrences_of("dead") > 0;
-    if dead {
-        info!("This node is dead");
-    }
-
     let pbft_engine = engine::PbftEngine::new(id, dead);
-
     let (driver, _stop) = ZmqDriver::new();
 
     info!("PBFT Node {} connecting to '{}'", &id, &endpoint);
+    if dead >= 0 {
+        info!("    This node will be dead after {} seconds", dead);
+    }
 
     driver.start(&endpoint, pbft_engine).unwrap_or_else(|err| {
         error!("{}", err);

@@ -16,6 +16,7 @@
  */
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 use sawtooth_sdk::consensus::{engine::*, service::Service};
 
@@ -26,18 +27,17 @@ use timing;
 
 use error::PbftError;
 
-use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 
 pub struct PbftEngine {
     id: u64,
-    dead: bool,
+    death_time: isize,
 }
 
 impl PbftEngine {
-    pub fn new(id: u64, dead: bool) -> Self {
-        PbftEngine { id: id, dead: dead }
+    pub fn new(id: u64, death_time: isize) -> Self {
+        PbftEngine { id: id, death_time: death_time}
     }
 }
 
@@ -53,6 +53,14 @@ impl Engine for PbftEngine {
         let config = config::load_pbft_config(chain_head.block_id, &mut service);
 
         let mut working_ticker = timing::Ticker::new(config.block_duration);
+        let mut prev_seconds;
+        let mut death_timeout = if self.death_time >= 0 {
+            prev_seconds = self.death_time as u64;
+            Some(timing::Timeout::new(Duration::from_secs(self.death_time as u64)))
+        } else {
+            prev_seconds = 0;
+            None
+        };
 
         let mut node = PbftNode::new(self.id, &config, service);
 
@@ -67,8 +75,16 @@ impl Engine for PbftEngine {
         loop {
             let incoming_message = updates.recv_timeout(config.message_timeout);
 
-            if self.dead {
-                continue;
+            if let Some(ref mut timeout) = death_timeout {
+                if timeout.is_expired() {
+                    panic!("{}: I died", node);
+                } else {
+                    let remaining = timeout.remaining();
+                    if remaining.as_secs() != prev_seconds {
+                        prev_seconds = remaining.as_secs();
+                        info!("{}: {} seconds until I die", node, prev_seconds);
+                    }
+                }
             }
 
             if let Err(e) = match incoming_message {
