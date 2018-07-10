@@ -77,12 +77,12 @@ impl Engine for PbftEngine {
 
             if let Some(ref mut timeout) = death_timeout {
                 if timeout.is_expired() {
-                    panic!("{}: I died", node);
+                    panic!("{}: I died", node.state);
                 } else {
                     let remaining = timeout.remaining();
                     if remaining.as_secs() != prev_seconds {
                         prev_seconds = remaining.as_secs();
-                        info!("{}: {} seconds until I die", node, prev_seconds);
+                        info!("{}: {} seconds until I die", node.state, prev_seconds);
                     }
                 }
             }
