@@ -23,6 +23,7 @@ use sawtooth_sdk::consensus::engine::PeerId;
 use config::PbftConfig;
 use message_type::PbftMessageType;
 use timing::Timeout;
+use error::PbftError;
 
 // Possible roles for a node
 // Primary is in charge of making consensus decisions
@@ -145,7 +146,7 @@ impl PbftState {
     }
 
     // Obtain the node ID from a serialized PeerId
-    pub fn get_node_id_from_bytes(&self, peer_id: &[u8]) -> u64 {
+    pub fn get_node_id_from_bytes(&self, peer_id: &[u8]) -> Result<u64, PbftError> {
         let deser_id = PeerId::from(peer_id.to_vec());
 
         let matching_node_ids: Vec<u64> = self.network_node_ids
@@ -154,10 +155,11 @@ impl PbftState {
             .map(|(node_id, _network_peer_id)| *node_id)
             .collect();
 
-        // TODO: Remove assertion
-        assert_eq!(matching_node_ids.len(), 1);
-
-        matching_node_ids[0]
+        if matching_node_ids.len() < 1 {
+            Err(PbftError::NodeNotFound)
+        } else {
+            Ok(matching_node_ids[0])
+        }
     }
 
     pub fn get_own_peer_id(&self) -> PeerId {
