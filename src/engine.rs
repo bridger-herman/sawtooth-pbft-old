@@ -30,6 +30,12 @@ use error::PbftError;
 use std::fs::File;
 use std::io::prelude::*;
 
+macro_rules! hang {
+    () => {
+        loop {}
+    };
+}
+
 pub struct PbftEngine {
     id: u64,
     death_time: isize,
@@ -37,7 +43,10 @@ pub struct PbftEngine {
 
 impl PbftEngine {
     pub fn new(id: u64, death_time: isize) -> Self {
-        PbftEngine { id: id, death_time: death_time}
+        PbftEngine {
+            id: id,
+            death_time: death_time,
+        }
     }
 }
 
@@ -56,7 +65,9 @@ impl Engine for PbftEngine {
         let mut prev_seconds;
         let mut death_timeout = if self.death_time >= 0 {
             prev_seconds = self.death_time as u64;
-            Some(timing::Timeout::new(Duration::from_secs(self.death_time as u64)))
+            Some(timing::Timeout::new(Duration::from_secs(
+                self.death_time as u64,
+            )))
         } else {
             prev_seconds = 0;
             None
@@ -64,7 +75,7 @@ impl Engine for PbftEngine {
 
         let mut node = PbftNode::new(self.id, &config, service);
 
-        info!("Starting state: {:#?}", node.state);
+        debug!("Starting state: {:#?}", node.state);
 
         let mut mod_file = File::create(format!("state_{}.txt", self.id).as_str()).unwrap();
         mod_file
@@ -77,12 +88,13 @@ impl Engine for PbftEngine {
 
             if let Some(ref mut timeout) = death_timeout {
                 if timeout.is_expired() {
-                    panic!("{}: I died", node.state);
+                    error!("{}: I died", node.state);
+                    hang!();
                 } else {
                     let remaining = timeout.remaining();
                     if remaining.as_secs() != prev_seconds {
                         prev_seconds = remaining.as_secs();
-                        info!("{}: {} seconds until I die", node.state, prev_seconds);
+                        debug!("{}: {} seconds until I die", node.state, prev_seconds);
                     }
                 }
             }
@@ -90,6 +102,11 @@ impl Engine for PbftEngine {
             let res = match incoming_message {
                 Ok(Update::BlockNew(block)) => node.on_block_new(block),
                 Ok(Update::BlockValid(block_id)) => node.on_block_valid(block_id),
+                Ok(Update::BlockInvalid(block_id)) => {
+                    // Just hang out until the block becomes valid
+                    warn!("{}: BlockInvalid", node.state);
+                    Ok(())
+                }
                 Ok(Update::BlockCommit(block_id)) => node.on_block_commit(block_id),
                 Ok(Update::PeerMessage(message, _sender_id)) => node.on_peer_message(message),
                 Ok(Update::Shutdown) => break,
