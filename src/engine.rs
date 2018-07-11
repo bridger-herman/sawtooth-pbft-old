@@ -30,6 +30,10 @@ use error::PbftError;
 use std::fs::File;
 use std::io::prelude::*;
 
+macro_rules! hang {
+    () => (loop {  });
+}
+
 pub struct PbftEngine {
     id: u64,
     death_time: isize,
@@ -37,7 +41,10 @@ pub struct PbftEngine {
 
 impl PbftEngine {
     pub fn new(id: u64, death_time: isize) -> Self {
-        PbftEngine { id: id, death_time: death_time}
+        PbftEngine {
+            id: id,
+            death_time: death_time,
+        }
     }
 }
 
@@ -56,7 +63,9 @@ impl Engine for PbftEngine {
         let mut prev_seconds;
         let mut death_timeout = if self.death_time >= 0 {
             prev_seconds = self.death_time as u64;
-            Some(timing::Timeout::new(Duration::from_secs(self.death_time as u64)))
+            Some(timing::Timeout::new(Duration::from_secs(
+                self.death_time as u64,
+            )))
         } else {
             prev_seconds = 0;
             None
@@ -77,7 +86,8 @@ impl Engine for PbftEngine {
 
             if let Some(ref mut timeout) = death_timeout {
                 if timeout.is_expired() {
-                    panic!("{}: I died", node.state);
+                    error!("{}: I died", node.state);
+                    hang!();
                 } else {
                     let remaining = timeout.remaining();
                     if remaining.as_secs() != prev_seconds {

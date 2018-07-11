@@ -30,8 +30,9 @@ use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftNewView,
 
 use config::PbftConfig;
 use error::PbftError;
+use message_extensions::PbftGetInfo;
 use message_type::PbftMessageType;
-use pbft_log::{PbftGetInfo, PbftLog, PbftStableCheckpoint};
+use pbft_log::{PbftLog, PbftStableCheckpoint};
 use state::{PbftMode, PbftPhase, PbftState};
 
 // The actual node
@@ -59,6 +60,8 @@ impl PbftNode {
         n
     }
 
+    // ---------- Methods for handling Updates from the validator ----------
+
     // Handle a peer message from another PbftNode
     // This method controls the PBFT multicast protocol (PrePrepare, Prepare, Commit, CommitFinal).
     pub fn on_peer_message(&mut self, msg: PeerMessage) -> Result<(), PbftError> {
@@ -68,15 +71,11 @@ impl PbftNode {
 
         // Handle a multicast protocol message
         if msg_type.is_multicast() {
-            let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
-            if let Err(e) = deser_msg {
-                return Err(PbftError::SerializationError(e));
-            }
-            let deser_msg = deser_msg.unwrap();
-
+            let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                .map_err(|e| PbftError::SerializationError(e))?;
             // Received a message from the primary, timeout can be reset
             let primary = self.state.get_primary_peer_id();
-            if deser_msg.get_info().get_signer_id().to_vec() == Vec::<u8>::from(primary) {
+            if pbft_message.get_info().get_signer_id().to_vec() == Vec::<u8>::from(primary) {
                 self.state.timeout.reset();
             }
 
@@ -85,12 +84,19 @@ impl PbftNode {
                 self.state,
                 msg.message_type,
                 self.state
-                    .get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
+                    .get_node_id_from_bytes(pbft_message.get_info().get_signer_id()),
             );
 
             // If we're in NotStarted, accept everything from the next seq number
-            if self.state.phase == PbftPhase::NotStarted && deser_msg.get_info().get_seq_num() > self.state.seq_num {
-                info!("{}: NotStarted, accept all. ({} > {})", self.state, deser_msg.get_info().get_seq_num(), self.state.seq_num);
+            if self.state.phase == PbftPhase::NotStarted
+                && pbft_message.get_info().get_seq_num() > self.state.seq_num
+            {
+                info!(
+                    "{}: NotStarted, accept all. ({} > {})",
+                    self.state,
+                    pbft_message.get_info().get_seq_num(),
+                    self.state.seq_num
+                );
                 self.msg_log.push_unread(msg);
                 return Ok(());
             }
@@ -99,340 +105,211 @@ impl PbftNode {
             // i.e. Don't process prepare messages if we're not in the PbftPhase::Preparing
             // Discard all multicast messages that come while we're in a ViewChange
             let expecting_type = self.state.check_msg_type();
-            if msg_type > expecting_type && deser_msg.get_info().get_seq_num() >= self.state.seq_num {
-                info!("{}: Pushing unread {:?} ({:?} > {:?} && {} >= {})", self.state, msg_type, msg_type, expecting_type, deser_msg.get_info().get_seq_num(), self.state.seq_num);
+            if msg_type > expecting_type
+                && pbft_message.get_info().get_seq_num() >= self.state.seq_num
+            {
+                info!(
+                    "{}: Pushing unread {:?} ({:?} > {:?} && {} >= {})",
+                    self.state,
+                    msg_type,
+                    msg_type,
+                    expecting_type,
+                    pbft_message.get_info().get_seq_num(),
+                    self.state.seq_num
+                );
                 self.msg_log.push_unread(msg);
                 return Ok(());
             } else if msg_type < expecting_type || self.state.mode == PbftMode::ViewChange {
-                info!("{}: {:?} < {:?}, skipping but adding to log", self.state, msg_type, expecting_type);
-                self.msg_log.add_message(deser_msg.clone());
+                info!(
+                    "{}: {:?} < {:?}, skipping but adding to log",
+                    self.state, msg_type, expecting_type
+                );
+                self.msg_log.add_message(pbft_message.clone());
                 return Ok(());
             }
+        }
 
-            match msg_type {
-                PbftMessageType::PrePrepare => {
-                    let info = deser_msg.get_info();
+        match msg_type {
+            PbftMessageType::Pulse => {
+                // Directly deserialize into PeerId
+                let primary = PeerId::from(msg.content);
 
-                    if info.get_view() != self.state.view {
-                        // TODO: return after cleaning up and resetting state (?)
-                        return Err(PbftError::ViewMismatch(
-                            info.get_view() as usize,
-                            self.state.view as usize,
-                        ));
-                    }
-
-                    // Immutably borrow self for a limited time
-                    {
-                        // Check that this PrePrepare doesn't already exist
-                        let existing_pre_prep_msgs = self.msg_log.get_messages_of_type(
-                            &PbftMessageType::PrePrepare,
-                            info.get_seq_num(),
-                            info.get_view(),
-                        );
-
-                        if existing_pre_prep_msgs.len() > 0 {
-                            return Err(PbftError::MessageExists(PbftMessageType::PrePrepare));
-                        }
-                    }
-                    {
-                        // TODO: Should the sequence number just be the block number?
-                        if self.state.is_primary() {
-                            // Check that incoming PrePrepare matches original BlockNew
-                            let block_new_msgs = self.msg_log.get_messages_of_type(
-                                &PbftMessageType::BlockNew,
-                                info.get_seq_num(),
-                                info.get_view(),
-                            );
-
-                            if block_new_msgs.len() != 1 {
-                                return Err(PbftError::WrongNumMessages(
-                                    PbftMessageType::BlockNew,
-                                    1,
-                                    block_new_msgs.len(),
-                                ));
-                            }
-
-                            if block_new_msgs[0].get_block() != deser_msg.get_block() {
-                                return Err(PbftError::BlockMismatch(
-                                    block_new_msgs[0].get_block().clone(),
-                                    deser_msg.get_block().clone(),
-                                ));
-                            }
-                        } else {
-                            // Set this secondary's sequence number from the PrePrepare message
-                            // (this was originally set by the primary)...
-                            self.state.seq_num = info.get_seq_num();
-
-                            // ...then update the BlockNew message we received with the correct
-                            // sequence number
-                            let num_updated = self.msg_log
-                                .fix_seq_nums(&PbftMessageType::BlockNew, info.get_seq_num(), deser_msg.get_block());
-
-                            info!("{}: The log updated {} BlockNew messages to seq num {}",
-                                  self.state, num_updated, info.get_seq_num());
-                        }
-                    }
-
-                    // Add message to the log
-                    // TODO: Putting log add here is necessary because on_peer_message gets
-                    // called again inside of _broadcast_pbft_message
-                    self.msg_log.add_message(deser_msg.clone());
-                    self.state.switch_phase(PbftPhase::Preparing);
-
-                    warn!("{}: PrePrepare, sequence number {}", self.state, info.get_seq_num());
-
-                    self._broadcast_pbft_message(
-                        info.get_seq_num(),
-                        PbftMessageType::Prepare,
-                        (*deser_msg.get_block()).clone(),
-                    )?;
+                // Reset the timer if the PeerId checks out
+                if self.state.get_primary_peer_id() == primary {
+                    self.state.timeout.reset();
                 }
-
-                PbftMessageType::Prepare => {
-                    // Add message to the log
-                    self.msg_log.add_message(deser_msg.clone());
-
-                    self._prepared(&deser_msg)?;
-
-                    if self.state.phase != PbftPhase::Checking {
-                        self.state.switch_phase(PbftPhase::Checking);
-                        // info!("{}: ------ Checking blocks", self.state);
-                        self.service
-                            .check_blocks(vec![
-                                BlockId::from(deser_msg.get_block().clone().block_id),
-                            ])
-                            .expect("Failed to check blocks");
-                    }
-                }
-
-                PbftMessageType::Commit => {
-                    // Add message to the log
-                    self.msg_log.add_message(deser_msg.clone());
-
-                    self._committed(&deser_msg)?;
-
-                    self.state.switch_phase(PbftPhase::FinalCommitting);
-
-                    self._broadcast_pbft_message(
-                        deser_msg.get_info().get_seq_num(),
-                        PbftMessageType::CommitFinal,
-                        (*deser_msg.get_block()).clone(),
-                    )?;
-                }
-
-                PbftMessageType::CommitFinal => {
-                    // Add message to the log
-                    self.msg_log.add_message(deser_msg.clone());
-
-                    let commit_final_msgs = self.msg_log.get_messages_of_type(
-                        &PbftMessageType::CommitFinal,
-                        deser_msg.get_info().get_seq_num(),
-                        deser_msg.get_info().get_view(),
-                    );
-
-                    self._check_msg_against_log(&&deser_msg, true, Some(self.state.f + 1))?;
-
-                    if self.state.phase == PbftPhase::FinalCommitting {
-                        self.state.switch_phase(PbftPhase::Finished);
-
-                        info!(
-                            "{}: Committing block {:?}",
-                            self.state,
-                            BlockId::from(deser_msg.get_block().block_id.clone())
-                        );
-
-                        self.service
-                            .commit_block(BlockId::from(deser_msg.get_block().block_id.clone()))
-                            .expect("Failed to commit block");
-
-                    } else {
-                        info!(
-                            "{}: Already committed block {:?}",
-                            self.state,
-                            BlockId::from(deser_msg.get_block().block_id.clone())
-                        );
-                    }
-                }
-
-                _ => warn!("Message type not implemented"),
             }
 
-        } else if msg_type.is_view_change() {
-            let deser_msg = protobuf::parse_from_bytes::<PbftViewChange>(&msg.content);
-            if let Err(e) = deser_msg {
-                return Err(PbftError::SerializationError(e));
-            }
-            let deser_msg = deser_msg.unwrap();
+            PbftMessageType::PrePrepare => {
+                let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
 
-            // info!(
-                // "{}: Received ViewChange message from Node {:02}",
-                // self.state,
-                // self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
-            // );
+                self._handle_pre_prepare(&pbft_message)?;
 
-            let mut nv_msg = PbftNewView::new();
-            {
-                self.msg_log.add_view_change(deser_msg.clone());
+                // NOTE: Putting log add here is necessary because on_peer_message gets
+                // called again inside of _broadcast_pbft_message
+                self.msg_log.add_message(pbft_message.clone());
+                self.state.switch_phase(PbftPhase::Preparing);
 
-                if self.state.mode != PbftMode::ViewChange {
-                    // info!("{}: Not doing anything (not in ViewChange mode)", self.state);
-                    return Ok(());
-                }
-
-                let infos = self.msg_log.get_message_infos(
-                    &PbftMessageType::ViewChange,
-                    self.state.seq_num,
-                    self.state.view,
-                );
-
-                self._check_msg_against_log(&&deser_msg, true, None)?;
-
-                // Update current view and reset timer
-                self.state.timeout.reset();
-                self.state.view += 1;
                 warn!(
-                    "{}: Updating to view {} and resetting timeout",
-                    self.state, self.state.view
+                    "{}: PrePrepare, sequence number {}",
+                    self.state,
+                    pbft_message.get_info().get_seq_num()
                 );
 
-                // Upgrade this node to primary, if its ID is correct
-                if self.state.get_own_peer_id() == self.state.get_primary_peer_id() {
-                    self.state.upgrade_role();
-                    warn!("{}: I'm now a primary", self.state);
-
-                    // If we're the new primary, need to clean up the block mess from the view change
-                    // self.service
-                        // .ignore_block()
-                        // .unwrap_or_else(|e| error!("Couldn't ignore block: {}", e));
-                    self.service
-                        .initialize_block(None)
-                        .unwrap_or_else(|err| error!("Couldn't initialize block: {}", err));
-                } else {
-                    warn!("{}: I'm now a secondary", self.state);
-                    self.state.downgrade_role();
-                }
-
-                // ViewChange messages
-                let vc_msgs_send = self.msg_log
-                    .get_view_change(self.state.view)
-                    .iter()
-                    .map(|&msg| msg.clone())
-                    .collect();
-
-                // PrePrepare messages - requests that need to get re-processed
-                // TODO: Verify these with every message in deser_msg
-                let mut pre_prep_msgs: Vec<PbftMessage> = self.msg_log
-                    .get_untrusted_pre_prepares()
-                    .iter()
-                    .map(|&msg| msg.clone())
-                    .collect();
-
-                let info = make_msg_info(
-                    &PbftMessageType::NewView,
-                    self.state.view,
-                    self.state.seq_num,
-                    self.state.get_own_peer_id(),
-                );
-
-                nv_msg.set_info(info);
-                nv_msg.set_view_change_messages(RepeatedField::from_vec(vc_msgs_send));
-                nv_msg.set_pre_prepare_messages(RepeatedField::from_vec(pre_prep_msgs));
-            }
-
-            let msg_bytes = nv_msg
-                .write_to_bytes()
-                .map_err(|e| PbftError::SerializationError(e));
-
-            match msg_bytes {
-                Err(e) => return Err(e),
-                Ok(bytes) => {
-                    self.state.mode = PbftMode::NewView;
-                    self._broadcast_message(&PbftMessageType::NewView, &bytes)?;
-                },
-            }
-
-        } else if msg_type.is_new_view() {
-            // TODO: Here is where we should restart the multicast protocol for messages since the
-            // last stable checkpoint
-
-            let deser_msg = protobuf::parse_from_bytes::<PbftNewView>(&msg.content);
-            if let Err(e) = deser_msg {
-                return Err(PbftError::SerializationError(e));
-            }
-            let deser_msg = deser_msg.unwrap();
-
-            // info!(
-                // "{}: Received NewView message from Node {:02}",
-                // self.state,
-                // self.state.get_node_id_from_bytes(deser_msg.get_info().get_signer_id()),
-            // );
-
-            // Add message to the log
-            self.msg_log.add_new_view(deser_msg.clone());
-
-            self._check_msg_against_log(&&deser_msg, true, None)?;
-
-            warn!("{}: Arrived in new view, transitioning to Normal mode", self.state);
-            self.state.mode = PbftMode::Normal;
-
-        } else if msg_type.is_checkpoint() {
-            let deser_msg = protobuf::parse_from_bytes::<PbftMessage>(&msg.content);
-            if let Err(e) = deser_msg {
-                return Err(PbftError::SerializationError(e));
-            }
-            let deser_msg = deser_msg.unwrap();
-
-            info!(
-                "{}: Received Checkpoint message from {:02}",
-                self.state,
-                self.state
-                    .get_node_id_from_bytes(deser_msg.get_info().get_signer_id())
-            );
-
-            if self.msg_log.get_latest_checkpoint() >= deser_msg.get_info().get_seq_num() {
-                debug!(
-                    "{}: Already at a stable checkpoint with this sequence number or past it!",
-                    self.state
-                );
-                return Ok(());
-            }
-
-            // Add message to the log
-            self.msg_log.add_message(deser_msg.clone());
-
-            // If we're a secondary, forward the message to everyone else in the network (resign it)
-            if !self.state.is_primary() && self.state.mode != PbftMode::Checkpointing {
-                self.state.pre_checkpoint_mode = self.state.mode;
-                self.state.mode = PbftMode::Checkpointing;
                 self._broadcast_pbft_message(
-                    deser_msg.get_info().get_seq_num(),
-                    PbftMessageType::Checkpoint,
-                    PbftBlock::new(),
+                    pbft_message.get_info().get_seq_num(),
+                    PbftMessageType::Prepare,
+                    (*pbft_message.get_block()).clone(),
                 )?;
             }
 
-            if self.state.mode == PbftMode::Checkpointing {
-                self._check_msg_against_log(&&deser_msg, true, None)?;
-                warn!(
-                    "{}: Reached stable checkpoint (seq num {}); garbage collecting logs",
+            PbftMessageType::Prepare => {
+                let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                self.msg_log.add_message(pbft_message.clone());
+
+                self._prepared(&pbft_message)?;
+
+                if self.state.phase != PbftPhase::Checking {
+                    self.state.switch_phase(PbftPhase::Checking);
+                    // info!("{}: ------ Checking blocks", self.state);
+                    self.service
+                        .check_blocks(vec![
+                            BlockId::from(pbft_message.get_block().clone().block_id),
+                        ])
+                        .expect("Failed to check blocks");
+                }
+            }
+
+            PbftMessageType::Commit => {
+                let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                self.msg_log.add_message(pbft_message.clone());
+
+                self._committed(&pbft_message)?;
+
+                self.state.switch_phase(PbftPhase::FinalCommitting);
+
+                self._broadcast_pbft_message(
+                    pbft_message.get_info().get_seq_num(),
+                    PbftMessageType::CommitFinal,
+                    (*pbft_message.get_block()).clone(),
+                )?;
+            }
+
+            PbftMessageType::CommitFinal => {
+                let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                self.msg_log.add_message(pbft_message.clone());
+
+                self._check_msg_against_log(&&pbft_message, true, Some(self.state.f + 1))?;
+
+                if self.state.phase == PbftPhase::FinalCommitting {
+                    self.state.switch_phase(PbftPhase::Finished);
+
+                    info!(
+                        "{}: Committing block {:?}",
+                        self.state,
+                        BlockId::from(pbft_message.get_block().block_id.clone())
+                    );
+
+                    self.service
+                        .commit_block(BlockId::from(pbft_message.get_block().block_id.clone()))
+                        .expect("Failed to commit block");
+                } else {
+                    info!(
+                        "{}: Already committed block {:?}",
+                        self.state,
+                        BlockId::from(pbft_message.get_block().block_id.clone())
+                    );
+                }
+            }
+
+            PbftMessageType::Checkpoint => {
+                let pbft_message = protobuf::parse_from_bytes::<PbftMessage>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                info!(
+                    "{}: Received Checkpoint message from {:02}",
                     self.state,
-                    deser_msg.get_info().get_seq_num()
-                );
-                self.msg_log.garbage_collect(
-                    deser_msg.get_info().get_seq_num(),
-                    deser_msg.get_info().get_view(),
+                    self.state
+                        .get_node_id_from_bytes(pbft_message.get_info().get_signer_id())
                 );
 
-                self.state.mode = self.state.pre_checkpoint_mode;
-            }
-        } else if msg_type.is_pulse() {
-            // Directly deserialize into PeerId
-            let primary = PeerId::from(msg.content);
+                if self.msg_log.get_latest_checkpoint() >= pbft_message.get_info().get_seq_num() {
+                    debug!(
+                        "{}: Already at a stable checkpoint with this sequence number or past it!",
+                        self.state
+                    );
+                    return Ok(());
+                }
 
-            // Reset the timer if the PeerId checks out
-            if self.state.get_primary_peer_id() == primary {
-                self.state.timeout.reset();
+                // Add message to the log
+                self.msg_log.add_message(pbft_message.clone());
+
+                self._handle_checkpoint(&pbft_message)?;
             }
+
+            PbftMessageType::ViewChange => {
+                let vc_message = protobuf::parse_from_bytes::<PbftViewChange>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                info!(
+                    "{}: Received ViewChange message from Node {:02}",
+                    self.state,
+                    self.state
+                        .get_node_id_from_bytes(vc_message.get_info().get_signer_id()),
+                );
+
+                self.msg_log.add_view_change(vc_message.clone());
+
+                if self.state.mode != PbftMode::ViewChange {
+                    return Ok(());
+                }
+
+                let nv_msg = self._handle_view_change(&vc_message)?;
+                let msg_bytes = nv_msg
+                    .write_to_bytes()
+                    .map_err(|e| PbftError::SerializationError(e));
+
+                match msg_bytes {
+                    Err(e) => return Err(e),
+                    Ok(bytes) => {
+                        self.state.mode = PbftMode::NewView;
+                        self._broadcast_message(&PbftMessageType::NewView, &bytes)?;
+                    }
+                }
+            }
+
+            PbftMessageType::NewView => {
+                // TODO: Here is where we should restart the multicast protocol for messages since the
+                // last stable checkpoint
+                let nv_message = protobuf::parse_from_bytes::<PbftNewView>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+
+                info!(
+                    "{}: Received NewView message from Node {:02}",
+                    self.state,
+                    self.state
+                        .get_node_id_from_bytes(nv_message.get_info().get_signer_id()),
+                );
+
+                self.msg_log.add_new_view(nv_message.clone());
+
+                self._check_msg_against_log(&&nv_message, true, None)?;
+
+                warn!(
+                    "{}: Arrived in new view, transitioning to Normal mode",
+                    self.state
+                );
+                self.state.mode = PbftMode::Normal;
+            }
+
+            _ => warn!("Message type not implemented"),
         }
 
         Ok(())
@@ -483,18 +360,15 @@ impl PbftNode {
     // If we're a primary, initialize a new block
     // For both node roles, change phase back to NotStarted
     pub fn on_block_commit(&mut self, block_id: BlockId) -> Result<(), PbftError> {
-        info!(
-            "{}: <<<<<< BlockCommit: {:?}",
-            self.state, block_id
-        );
+        info!("{}: <<<<<< BlockCommit: {:?}", self.state, block_id);
 
         if self.state.phase == PbftPhase::Finished {
             if self.state.is_primary() {
                 // Initialize block if we're ready to do so and advance the sequence number
                 // TODO?
                 // info!(
-                    // "{}: <<<<<< BlockCommit and initializing new one: {:?}",
-                    // self.state, block_id
+                // "{}: <<<<<< BlockCommit and initializing new one: {:?}",
+                // self.state, block_id
                 // );
                 self.service
                     .initialize_block(None)
@@ -534,6 +408,8 @@ impl PbftNode {
 
         Ok(())
     }
+
+    // ---------- Methods for periodically checking on and updating the state, called by the engine ----------
 
     // The primary tries to finalize a block every so often
     pub fn update_working_block(&mut self) -> Result<(), PbftError> {
@@ -599,10 +475,6 @@ impl PbftNode {
     // until the view change is complete.
     pub fn start_view_change(&mut self) -> Result<(), PbftError> {
         if self.state.mode == PbftMode::ViewChange {
-            // warn!(
-                // "{}: Already in a view change -- this might mean the network is dead",
-                // self
-            // );
             return Ok(());
         }
         warn!("{}: Starting view change", self.state);
@@ -614,7 +486,7 @@ impl PbftNode {
         } = if let Some(ref cp) = self.msg_log.latest_stable_checkpoint {
             cp.clone()
         } else {
-            PbftStableCheckpoint{
+            PbftStableCheckpoint {
                 seq_num: 0,
                 checkpoint_messages: vec![],
             }
@@ -648,16 +520,186 @@ impl PbftNode {
         }
     }
 
+    // ---------- Methods for handling individual PeerMessages
+
+    // Handle a PrePrepare message
+    // A PrePrepare message with this view and sequence number must not exist in the log.
+    // If this node is a primary, make sure there's a corresponding BlockNew message.
+    // If this node is a secondary, then it takes the sequence number from this message as its own.
+    fn _handle_pre_prepare(&mut self, pbft_message: &PbftMessage) -> Result<(), PbftError> {
+        let info = pbft_message.get_info();
+
+        if info.get_view() != self.state.view {
+            // TODO: return after cleaning up and resetting state (?)
+            return Err(PbftError::ViewMismatch(
+                info.get_view() as usize,
+                self.state.view as usize,
+            ));
+        }
+
+        // Immutably borrow self for a bit, in a context
+        {
+            // Check that this PrePrepare doesn't already exist
+            let existing_pre_prep_msgs = self.msg_log.get_messages_of_type(
+                &PbftMessageType::PrePrepare,
+                info.get_seq_num(),
+                info.get_view(),
+            );
+
+            if existing_pre_prep_msgs.len() > 0 {
+                return Err(PbftError::MessageExists(PbftMessageType::PrePrepare));
+            }
+        }
+
+        if self.state.is_primary() {
+            // Check that incoming PrePrepare matches original BlockNew
+            let block_new_msgs = self.msg_log.get_messages_of_type(
+                &PbftMessageType::BlockNew,
+                info.get_seq_num(),
+                info.get_view(),
+            );
+
+            if block_new_msgs.len() != 1 {
+                return Err(PbftError::WrongNumMessages(
+                    PbftMessageType::BlockNew,
+                    1,
+                    block_new_msgs.len(),
+                ));
+            }
+
+            if block_new_msgs[0].get_block() != pbft_message.get_block() {
+                return Err(PbftError::BlockMismatch(
+                    block_new_msgs[0].get_block().clone(),
+                    pbft_message.get_block().clone(),
+                ));
+            }
+        } else {
+            // Set this secondary's sequence number from the PrePrepare message
+            // (this was originally set by the primary)...
+            self.state.seq_num = info.get_seq_num();
+
+            // ...then update the BlockNew message we received with the correct
+            // sequence number
+            let num_updated = self.msg_log.fix_seq_nums(
+                &PbftMessageType::BlockNew,
+                info.get_seq_num(),
+                pbft_message.get_block(),
+            );
+
+            info!(
+                "{}: The log updated {} BlockNew messages to seq num {}",
+                self.state,
+                num_updated,
+                info.get_seq_num()
+            );
+        }
+        Ok(())
+    }
+
+    // Handle a Checkpoint message
+    // Secondaries send out a Checkpoint message
+    // Everyone waits to receive 2f + 1 Checkpoint messages, then garbage collects logs
+    fn _handle_checkpoint(&mut self, pbft_message: &PbftMessage) -> Result<(), PbftError> {
+        // If we're a secondary, forward the message to everyone else in the network (resign it)
+        if !self.state.is_primary() && self.state.mode != PbftMode::Checkpointing {
+            self.state.pre_checkpoint_mode = self.state.mode;
+            self.state.mode = PbftMode::Checkpointing;
+            self._broadcast_pbft_message(
+                pbft_message.get_info().get_seq_num(),
+                PbftMessageType::Checkpoint,
+                PbftBlock::new(),
+            )?;
+        }
+
+        if self.state.mode == PbftMode::Checkpointing {
+            self._check_msg_against_log(&pbft_message, true, None)?;
+            warn!(
+                "{}: Reached stable checkpoint (seq num {}); garbage collecting logs",
+                self.state,
+                pbft_message.get_info().get_seq_num()
+            );
+            self.msg_log.garbage_collect(
+                pbft_message.get_info().get_seq_num(),
+                pbft_message.get_info().get_view(),
+            );
+
+            self.state.mode = self.state.pre_checkpoint_mode;
+        }
+        Ok(())
+    }
+
+    fn _handle_view_change(
+        &mut self,
+        vc_message: &PbftViewChange,
+    ) -> Result<PbftNewView, PbftError> {
+        self._check_msg_against_log(&vc_message, true, None)?;
+
+        // Update current view and reset timer
+        self.state.timeout.reset();
+        self.state.view += 1;
+        warn!(
+            "{}: Updating to view {} and resetting timeout",
+            self.state, self.state.view
+        );
+
+        // Upgrade this node to primary, if its ID is correct
+        if self.state.get_own_peer_id() == self.state.get_primary_peer_id() {
+            self.state.upgrade_role();
+            warn!("{}: I'm now a primary", self.state);
+
+            // If we're the new primary, need to clean up the block mess from the view change
+            // self.service
+            // .ignore_block()
+            // .unwrap_or_else(|e| error!("Couldn't ignore block: {}", e));
+            self.service
+                .initialize_block(None)
+                .unwrap_or_else(|err| error!("Couldn't initialize block: {}", err));
+        } else {
+            warn!("{}: I'm now a secondary", self.state);
+            self.state.downgrade_role();
+        }
+
+        // ViewChange messages
+        let vc_msgs_send = self.msg_log
+            .get_view_change(self.state.view)
+            .iter()
+            .map(|&msg| msg.clone())
+            .collect();
+
+        // PrePrepare messages - requests that need to get re-processed
+        // TODO: Verify these with every message in vc_message
+        let mut pre_prep_msgs: Vec<PbftMessage> = self.msg_log
+            .get_untrusted_pre_prepares()
+            .iter()
+            .map(|&msg| msg.clone())
+            .collect();
+
+        let info = make_msg_info(
+            &PbftMessageType::NewView,
+            self.state.view,
+            self.state.seq_num,
+            self.state.get_own_peer_id(),
+        );
+
+        let mut nv_msg = PbftNewView::new();
+        nv_msg.set_info(info);
+        nv_msg.set_view_change_messages(RepeatedField::from_vec(vc_msgs_send));
+        nv_msg.set_pre_prepare_messages(RepeatedField::from_vec(pre_prep_msgs));
+        Ok(nv_msg)
+    }
+
+    // ---------- Methods for checking on the current state ----------
+
     // "prepared" predicate
     fn _prepared(&self, deser_msg: &PbftMessage) -> Result<(), PbftError> {
-
         let info = deser_msg.get_info();
         let block_new_msgs = self.msg_log.get_messages_of_type(
             &PbftMessageType::BlockNew,
             info.get_seq_num(),
             info.get_view(),
         );
-        if block_new_msgs.len() < 1 { // TODO: Deal with more than 1 message (match them)
+        if block_new_msgs.len() < 1 {
+            // TODO: Deal with more than 1 message (match them)
             return Err(PbftError::WrongNumMessages(
                 PbftMessageType::BlockNew,
                 1,
@@ -703,12 +745,6 @@ impl PbftNode {
 
     // "committed" predicate
     fn _committed(&self, deser_msg: &PbftMessage) -> Result<(), PbftError> {
-        let commit_msgs = self.msg_log.get_messages_of_type(
-            &PbftMessageType::Commit,
-            deser_msg.get_info().get_seq_num(),
-            deser_msg.get_info().get_view(),
-        );
-
         self._check_msg_against_log(&deser_msg, true, None)?;
 
         self._prepared(deser_msg)?;
@@ -754,6 +790,8 @@ impl PbftNode {
 
         Ok(())
     }
+
+    // ---------- Methods for communication between nodes ----------
 
     // Broadcast a message to this node's peers, and itself
     fn _broadcast_pbft_message(
